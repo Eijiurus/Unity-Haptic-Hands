@@ -1,0 +1,3 @@
+这是一个 Unity 2022 项目，使用 C# 开发。
+硬件包括 Elastreme Sense Manu-5D 手套（通过上位机传数据）、Arduino（串口通信）、DRV2605 触觉芯片。
+主要功能是虚拟手抓取和触觉反馈。使用 XR Interaction Toolkit。
