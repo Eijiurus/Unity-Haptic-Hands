@@ -1,32 +1,40 @@
 using System;
-using System.IO.Ports;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using UnityEngine;
 
 /// <summary>
-/// 从 Arduino 串口读取数据手套的五指弯曲数据。
-/// 包含键盘模拟模式，无需硬件即可测试手指弯曲。
+/// 接收手套传感器数据，提供归一化的五指弯曲值给 DataGloveHandDriver。
 ///
 /// 数据链路：
-///   Manu-5D 手套传感器 → 采集盒模拟输出(0-5V) → Arduino ADC
-///   → Arduino 串口输出 "thumb,index,middle,ring,pinky\n" → Unity
+///   Manu-5D 手套 → 蓝牙(115200) → PC 串口
+///   → SensorBridge.py（读取串口，UDP 转发）
+///   → 本脚本（UDP 接收，解析，归一化）
+///   → DataGloveHandDriver（驱动骨骼旋转）
+///
+/// 数据格式（来自 SensorBridge.py）：
+///   "1504,900,100,0,0,0,0,0,0,0,0"
+///   前 5 个值为手指弯曲（0-1800 = 0.0°-180.0°），以逗号分隔。
+///   传感器通道顺序：CH1=小指, CH2=无名指, CH3=中指, CH4=食指, CH5=拇指
 /// </summary>
 public class GloveDataReceiver : MonoBehaviour
 {
-    [Header("模式选择")]
-    [Tooltip("勾选后使用键盘模拟手指弯曲（1-5 键），无需连接 Arduino")]
+    [Header("数据源模式")]
+    [Tooltip("勾选后使用键盘模拟手指弯曲（1-5 键），无需连接硬件")]
     [SerializeField] private bool useKeyboardSimulation = true;
 
-    [Header("串口设置（连接 Arduino）")]
-    [Tooltip("Arduino 所在的 COM 端口")]
-    [SerializeField] private string portName = "COM3";
-    [SerializeField] private int baudRate = 9600;
+    [Header("UDP 设置（接收 SensorBridge.py 数据）")]
+    [Tooltip("SensorBridge.py 发送的 UDP 端口")]
+    [SerializeField] private int udpPort = 5005;
 
     [Header("数据映射")]
-    [Tooltip("Arduino ADC 最小值（手指伸直时的读数）")]
-    [SerializeField] private float rawMin = 0f;
-    [Tooltip("Arduino ADC 最大值（手指完全弯曲时的读数），10位 ADC 为 1023")]
-    [SerializeField] private float rawMax = 1023f;
+    [Tooltip("传感器原始值上限（1800 = 180.0°）")]
+    [SerializeField] private float rawMax = 1800f;
+
+    [Tooltip("传感器通道顺序为 CH1=小指→CH5=拇指，需反转为拇指在前")]
+    [SerializeField] private bool reverseFingerOrder = true;
 
     [Header("调试")]
     [SerializeField] private bool showDebugLog = false;
@@ -37,26 +45,23 @@ public class GloveDataReceiver : MonoBehaviour
     /// </summary>
     public float[] FingerValues { get; private set; } = new float[5];
 
-    public bool IsConnected => _serialPort != null && _serialPort.IsOpen;
-
-    private SerialPort _serialPort;
-    private Thread _readThread;
+    private UdpClient _udpClient;
+    private Thread _receiveThread;
     private volatile bool _keepReading;
     private readonly float[] _threadBuffer = new float[5];
     private volatile bool _newDataAvailable;
 
-    // 键盘模拟用
     private float[] _simTargets = new float[5];
 
     void OnEnable()
     {
         if (!useKeyboardSimulation)
-            OpenPort();
+            StartUdpReceiver();
     }
 
     void OnDisable()
     {
-        ClosePort();
+        StopUdpReceiver();
     }
 
     void Update()
@@ -83,18 +88,14 @@ public class GloveDataReceiver : MonoBehaviour
 
     void OnDestroy()
     {
-        ClosePort();
+        StopUdpReceiver();
     }
 
     // ─────────────── 键盘模拟模式 ───────────────
 
     private void UpdateKeyboardSimulation()
     {
-        // 按住 1-5 键 → 对应手指弯曲，松开 → 伸直
-        // 1=拇指, 2=食指, 3=中指, 4=无名指, 5=小指
-        // 按 Space → 所有手指同时握拳
         KeyCode[] keys = { KeyCode.Alpha1, KeyCode.Alpha2, KeyCode.Alpha3, KeyCode.Alpha4, KeyCode.Alpha5 };
-
         bool allGrip = Input.GetKey(KeyCode.Space);
 
         for (int i = 0; i < 5; i++)
@@ -110,76 +111,74 @@ public class GloveDataReceiver : MonoBehaviour
         }
     }
 
-    // ─────────────── 串口管理 ───────────────
+    // ─────────────── UDP 接收 ───────────────
 
-    private void OpenPort()
+    private void StartUdpReceiver()
     {
-        if (_serialPort != null && _serialPort.IsOpen) return;
+        if (_udpClient != null) return;
         try
         {
-            _serialPort = new SerialPort(portName, baudRate)
-            {
-                ReadTimeout = 100,
-                DtrEnable = true,
-                RtsEnable = true
-            };
-            _serialPort.Open();
-            _serialPort.DiscardInBuffer();
-
+            _udpClient = new UdpClient(udpPort);
             _keepReading = true;
-            _readThread = new Thread(ReadLoop) { IsBackground = true };
-            _readThread.Start();
-
-            Debug.Log($"[GloveDataReceiver] 已连接 Arduino @ {portName} ({baudRate})");
+            _receiveThread = new Thread(UdpReadLoop) { IsBackground = true };
+            _receiveThread.Start();
+            Debug.Log($"[GloveDataReceiver] UDP 监听已启动 @ 端口 {udpPort}，等待 SensorBridge.py 数据...");
         }
         catch (Exception e)
         {
-            Debug.LogError($"[GloveDataReceiver] 无法打开 {portName}: {e.Message}");
+            Debug.LogError($"[GloveDataReceiver] UDP 启动失败: {e.Message}");
         }
     }
 
-    private void ClosePort()
+    private void StopUdpReceiver()
     {
         _keepReading = false;
-        if (_readThread != null && _readThread.IsAlive)
-            _readThread.Join(200);
-        _readThread = null;
-        if (_serialPort != null && _serialPort.IsOpen)
-        {
-            try { _serialPort.Close(); } catch { }
-        }
-        _serialPort = null;
+        _udpClient?.Close();
+        _udpClient = null;
+        if (_receiveThread != null && _receiveThread.IsAlive)
+            _receiveThread.Join(300);
+        _receiveThread = null;
     }
 
-    private void ReadLoop()
+    private void UdpReadLoop()
     {
         while (_keepReading)
         {
             try
             {
-                string line = _serialPort.ReadLine().Trim();
-                if (string.IsNullOrEmpty(line)) continue;
-                ParseLine(line);
+                IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
+                byte[] data = _udpClient.Receive(ref remoteEP);
+                string msg = Encoding.UTF8.GetString(data).Trim().TrimEnd(';');
+                ParseSensorData(msg);
             }
-            catch (TimeoutException) { }
+            catch (ObjectDisposedException) { break; }
+            catch (SocketException) { if (!_keepReading) break; }
             catch (Exception e)
             {
                 if (_keepReading)
-                    Debug.LogWarning($"[GloveDataReceiver] 读取异常: {e.Message}");
+                    Debug.LogWarning($"[GloveDataReceiver] UDP 读取异常: {e.Message}");
             }
         }
     }
 
-    private void ParseLine(string line)
+    /// <summary>
+    /// 解析 "1504,900,100,0,0,0,0,0,0,0,0" 格式。
+    /// 前 5 个值为手指弯曲度（0-1800 = 0.0°-180.0°）。
+    /// </summary>
+    private void ParseSensorData(string line)
     {
         string[] parts = line.Split(',');
         if (parts.Length < 5) return;
+
         lock (_threadBuffer)
         {
             for (int i = 0; i < 5; i++)
             {
-                if (float.TryParse(parts[i].Trim(), out float raw))
-                    _threadBuffer[i] = Mathf.InverseLerp(rawMin, rawMax, raw);
+                if (!float.TryParse(parts[i].Trim(), out float raw)) continue;
+                float normalized = Mathf.Clamp01(raw / rawMax);
+
+                int targetIndex = reverseFingerOrder ? (4 - i) : i;
+                _threadBuffer[targetIndex] = normalized;
             }
         }
         _newDataAvailable = true;
