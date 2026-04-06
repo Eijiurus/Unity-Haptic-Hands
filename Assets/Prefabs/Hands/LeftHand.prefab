@@ -1131,6 +1131,7 @@ GameObject:
   m_Component:
   - component: {fileID: 6487073076873849361}
   - component: {fileID: 1373423962535953804}
+  - component: {fileID: 9182736459102837465}
   m_Layer: 0
   m_Name: LeftHand
   m_TagString: Untagged
@@ -1197,9 +1198,29 @@ MonoBehaviour:
   boneSuffix: .L
   smoothSpeed: 12
   enableWristRotation: 1
-  wristSmoothSpeed: 10
+  wristSmoothSpeed: 6
+  wristAngleScale: 0.55
+  wristEulerFilterSpeed: 8
   axisSign: {x: -1, y: -1, z: 1}
   axisRemap: {x: 0, y: 2, z: 1}
+--- !u!114 &9182736459102837465
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3681755669438027100}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7c2f8e9a1b3c4d5e6f708192a3b4c5d8, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  gloveData: {fileID: 0}
+  boneSuffix: .L
+  tipRadius: 0.018
+  tipLocalOffset: {x: 0, y: 0, z: 0.012}
+  pinchThreshold: 0.5
+  pinchKey: 103
 --- !u!1 &3871187150524126004
 GameObject:
   m_ObjectHideFlags: 0

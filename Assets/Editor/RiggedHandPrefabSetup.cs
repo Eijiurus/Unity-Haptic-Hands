@@ -106,6 +106,15 @@ public class RiggedHandPrefabSetup : EditorWindow
             so.ApplyModifiedPropertiesWithoutUndo();
         }
 
+        HandInteractionRig hir = go.AddComponent<HandInteractionRig>();
+        SerializedObject hirSo = new SerializedObject(hir);
+        SerializedProperty hirSuffix = hirSo.FindProperty("boneSuffix");
+        if (hirSuffix != null)
+        {
+            hirSuffix.stringValue = ".L";
+            hirSo.ApplyModifiedPropertiesWithoutUndo();
+        }
+
         return go;
     }
 
@@ -173,6 +182,7 @@ public class RiggedHandPrefabSetup : EditorWindow
         gloveManager.AddComponent<WitMotionConnector>();
 
         WireGloveData(leftInScene, receiver);
+        WireHandInteraction(leftInScene, receiver);
 
         Selection.activeGameObject = leftInScene;
         SceneView.FrameLastActiveSceneView();
@@ -195,6 +205,23 @@ public class RiggedHandPrefabSetup : EditorWindow
             gloveProp.objectReferenceValue = receiver;
             so.ApplyModifiedProperties();
             Debug.Log($"[RiggedHandPrefabSetup] {handObj.name} 的 GloveData 已连接");
+        }
+    }
+
+    static void WireHandInteraction(GameObject handObj, GloveDataReceiver receiver)
+    {
+        HandInteractionRig hir = handObj.GetComponent<HandInteractionRig>();
+        if (hir == null)
+            hir = handObj.GetComponentInChildren<HandInteractionRig>();
+        if (hir == null) return;
+
+        SerializedObject so = new SerializedObject(hir);
+        SerializedProperty p = so.FindProperty("gloveData");
+        if (p != null)
+        {
+            p.objectReferenceValue = receiver;
+            so.ApplyModifiedProperties();
+            Debug.Log($"[RiggedHandPrefabSetup] {handObj.name} 的 HandInteractionRig 已连接 GloveDataReceiver");
         }
     }
 

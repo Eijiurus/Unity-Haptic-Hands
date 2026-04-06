@@ -29,8 +29,14 @@ public class DataGloveHandDriver : MonoBehaviour
     [Tooltip("是否启用蓝牙传感器控制手腕旋转")]
     public bool enableWristRotation = true;
 
-    [Tooltip("手腕旋转平滑速度")]
-    [SerializeField, Range(1f, 30f)] private float wristSmoothSpeed = 10f;
+    [Tooltip("手腕跟随速度：数值越小越稳、越不飘，但延迟略大")]
+    [SerializeField, Range(1f, 30f)] private float wristSmoothSpeed = 6f;
+
+    [Tooltip("角度灵敏度：1=与传感器角度 1:1，调小则同样手腕动作虚拟手转得少、更不飘")]
+    [SerializeField, Range(0.1f, 1f)] private float wristAngleScale = 0.55f;
+
+    [Tooltip("对传感器欧拉角再做一层低通（0=关闭）。略减抖动，略增延迟")]
+    [SerializeField, Range(0f, 25f)] private float wristEulerFilterSpeed = 8f;
 
     [Tooltip("坐标系映射：传感器轴 → Unity 轴的符号翻转\n" +
              "传感器右手坐标系与 Unity 左手坐标系不同，佩戴方向也会影响映射。\n" +
@@ -44,6 +50,8 @@ public class DataGloveHandDriver : MonoBehaviour
 
     private Quaternion _initialWristRotation;
     private Quaternion _currentWristRotation;
+    private float _filtUx, _filtUy, _filtUz;
+    private bool _wristEulerFilterPrimed;
 
     private FingerConfig[] _fingers;
     private float[] _currentValues = new float[5];
@@ -57,6 +65,8 @@ public class DataGloveHandDriver : MonoBehaviour
         CacheInitialRotations();
         _initialWristRotation = transform.localRotation;
         _currentWristRotation = Quaternion.identity;
+        _filtUx = _filtUy = _filtUz = 0f;
+        _wristEulerFilterPrimed = false;
     }
 
     void Update()
@@ -93,9 +103,30 @@ public class DataGloveHandDriver : MonoBehaviour
         float angZ = (float)wtDevice.GetDeviceData("AngZ");
 
         float[] sensorAngles = { angX, angY, angZ };
-        float ux = sensorAngles[axisRemap.x] * axisSign.x;
-        float uy = sensorAngles[axisRemap.y] * axisSign.y;
-        float uz = sensorAngles[axisRemap.z] * axisSign.z;
+        float ux = sensorAngles[axisRemap.x] * axisSign.x * wristAngleScale;
+        float uy = sensorAngles[axisRemap.y] * axisSign.y * wristAngleScale;
+        float uz = sensorAngles[axisRemap.z] * axisSign.z * wristAngleScale;
+
+        if (wristEulerFilterSpeed > 0f)
+        {
+            if (!_wristEulerFilterPrimed)
+            {
+                _filtUx = ux;
+                _filtUy = uy;
+                _filtUz = uz;
+                _wristEulerFilterPrimed = true;
+            }
+            else
+            {
+                float t = Mathf.Clamp01(Time.deltaTime * wristEulerFilterSpeed);
+                _filtUx = Mathf.Lerp(_filtUx, ux, t);
+                _filtUy = Mathf.Lerp(_filtUy, uy, t);
+                _filtUz = Mathf.Lerp(_filtUz, uz, t);
+            }
+            ux = _filtUx;
+            uy = _filtUy;
+            uz = _filtUz;
+        }
 
         Quaternion targetRot = Quaternion.Euler(ux, uy, uz);
         _currentWristRotation = Quaternion.Slerp(_currentWristRotation, targetRot,

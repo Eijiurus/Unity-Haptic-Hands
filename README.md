@@ -4,6 +4,14 @@
 
 ---
 
+## 文档维护约定
+
+本仓库以根目录 **`README.md`** 作为**项目说明与变更备忘的主文档**。后续凡有实质改动（例如脚本增删、数据链路变化、硬件接线、Unity Inspector 新增/默认参数、排错经验），**请在本文件中同步更新**，便于日后查阅，也便于协作或 AI 辅助时直接引用。
+
+**建议务必更新 README 的情况**：新增或移除核心脚本/SDK、修改 `SensorBridge` / UDP / BLE 流程、调整 `DataGloveHandDriver` / `WitMotionConnector` / **手部交互与拿捏**相关逻辑、记录新的已知问题与解决办法。
+
+---
+
 ## 系统架构
 
 ```mermaid
@@ -47,6 +55,9 @@ flowchart LR
 | `WitMotionConnector.cs` | 管理 WT9011DCL-BT50 蓝牙扫描/连接/断开 | **姿态传感器管理** |
 | `HandSceneSetup.cs` | 运行时自动计算网格位置并定位摄像机 | **场景管理层** |
 | `RiggedHandPrefabSetup.cs` | 编辑器工具，一键生成 Prefab 并放入场景 | **编辑器工具** |
+| `HandInteractionRig.cs` | 五指尖 Trigger + 捏取逻辑（拇指+食指弯曲或 G 键） | **手部物理交互** |
+| `TouchableObject.cs` | 可触摸/可拿捏物体（高亮 + UnityEvent，可接触觉串口） | **场景物体** |
+| `FingerTipRelay.cs` | 指尖 Trigger 转发给 `HandInteractionRig` | **辅助** |
 
 ### SDK 文件（WitMotion 官方）
 
@@ -141,6 +152,9 @@ My project/
 │       ├── GloveDataReceiver.cs        # UDP 数据接收 + 键盘模拟
 │       ├── DataGloveHandDriver.cs      # 骨骼驱动（手指弯曲 + 手腕姿态）
 │       ├── WitMotionConnector.cs       # WitMotion 蓝牙扫描/连接管理
+│       ├── HandInteractionRig.cs       # 指尖碰撞 + 捏取
+│       ├── TouchableObject.cs          # 可触摸/可拿物体
+│       ├── FingerTipRelay.cs           # 指尖 Trigger 转发
 │       ├── HandSceneSetup.cs           # 摄像机自动对准手部
 │       │
 │       ├── Bluetooth/                  # WitMotion BLE SDK
@@ -181,8 +195,12 @@ My project/
 - **双重职责**：
   1. **手指弯曲**：读取 `GloveDataReceiver.FingerValues`，旋转 15 个骨骼关节
   2. **手腕旋转**：读取 WitMotion SDK 的 `DeviceModel.GetDeviceData("AngX/Y/Z")`，通过欧拉角→四元数转换控制手部根节点旋转
-- **坐标系映射**：Inspector 中可调 `Axis Sign` 和 `Axis Remap`，用于适配传感器佩戴方向
-- **可调参数**：`enableWristRotation`（开关手腕旋转）、`wristSmoothSpeed`（手腕平滑）
+- **坐标系映射**：Inspector 中可调 `Axis Sign`、`Axis Remap`，适配传感器佩戴方向
+- **手腕灵敏度与稳定**（均可在 Inspector 调整，无需改代码）：
+  - `Wrist Angle Scale`：整体缩小传感器角度对手模的影响（**降低灵敏度**），默认约 `0.55`，越小越「稳」、动作幅度越小
+  - `Wrist Smooth Speed`：四元数插值速度，**越小越不飘**、延迟略增，默认约 `6`
+  - `Wrist Euler Filter Speed`：对欧拉角再做低通滤波，减轻抖动；设为 `0` 可关闭
+- **其它**：`enableWristRotation` 开关手腕跟随；手指弯曲仍由 `smoothSpeed` 控制
 
 #### `Scripts/WitMotionConnector.cs` — 姿态传感器管理
 
@@ -197,6 +215,28 @@ My project/
 
 - **挂载位置**：主摄像机上
 - **功能**：通过 `Renderer.bounds` 计算手部网格实际位置，自动定位摄像机
+
+#### `Scripts/HandInteractionRig.cs` — 触摸与捏取（无 XR）
+
+- **挂载位置**：`LeftHand` 根物体（`Setup Rigged Hand Prefab` 已写入 Prefab，并自动绑定 `GloveDataReceiver`）
+- **原理**：在 `thumb.03` / `finger_*.03` 等远端骨骼下生成**球形 Trigger**；左手根节点带 **Kinematic Rigidbody**，与带 **Rigidbody + 非 Trigger Collider** 的物体产生触发检测
+- **捏取条件**：**拇指 + 食指**弯曲值 ≥ `Pinch Threshold`（0~1），或按住 **G 键**（便于无手套测试）；从当前接触的 `TouchableObject` 中选距离食指指尖最近的一个
+- **释放**：松开捏取（手指伸直或松开 G）后物体恢复非 Kinematic、脱离父物体
+- **调参**：`Tip Radius`、`Tip Local Offset`（指尖球位置）、`Pinch Threshold`
+
+#### `Scripts/TouchableObject.cs` — 可交互物体
+
+- **要求**：同一物体上需有 **Rigidbody** + **Collider（非 Trigger）**
+- **反馈**：指尖进入时材质变色；可在 Inspector 中为 **`onTouchEnter` / `onGrabbed` / `onReleased`** 等 **UnityEvent** 绑定脚本，用于后续 **Arduino / DRV2605 串口触觉**（本仓库中可另写一个小脚本在 Event 里发串口）
+
+---
+
+## 触摸、拿捏与后续触觉（Unity 内）
+
+1. **手部**：确保 `LeftHand` 上有 `HandInteractionRig`（重新运行一次 `Tools → Setup Rigged Hand Prefab` 可补全并连接 `gloveData`）。
+2. **场景物体**：在立方体等物体上添加 **`TouchableObject`**（若已有 Rigidbody/Collider 会自动配合；`SampleScene` 中的 **GrabbableCube** 已挂载示例）。
+3. **操作**：移动手腕与手指使指尖靠近物体 → 应看到**高亮**；**拇指+食指同时弯曲**（或按住 **G**）→ **捏取**并随食指指尖移动；松手 → **放下**。
+4. **真机触觉**：在 `TouchableObject` 的 **`onTouchEnter` / `onGrabbed`** 上挂接你的串口发送脚本，即可在「碰到 / 抓住」时驱动 Arduino + DRV2605（与 README 系统架构中的下行链路一致）。
 
 ---
 
@@ -232,6 +272,8 @@ Tools → Setup Rigged Hand Prefab
 
 > **旋转方向不对？** 在 `DataGloveHandDriver` 中调整 `Axis Sign` 与 `Axis Remap`。
 
+> **手腕太灵敏、发飘？** 减小 `Wrist Angle Scale`、略减小 `Wrist Smooth Speed`，或适当提高 `Wrist Euler Filter Speed`（详见上文「DataGloveHandDriver」一节）。
+
 > **官方文档提示**：模块固件中的 **`autoConnection` 不要打开**，否则易出现连接慢、失败；与 Unity 里脚本的「Auto Connect」不是同一项。
 
 ---
@@ -261,14 +303,17 @@ Tools → Setup Rigged Hand Prefab
 [x] GloveDataReceiver UDP 接收 + 键盘模拟
 [x] WitMotion WT9011DCL-BT50 蓝牙连接集成（PollDevice 持续扫描 + connectable 标志 workaround）
 [x] 手腕姿态旋转（欧拉角，可配置坐标系映射）
+[x] 手腕灵敏度与滤波（Angle Scale / Smooth Speed / Euler Filter）
 [x] RiggedHandPrefabSetup 自动为 GloveManager 添加 WitMotionConnector
+[x] 指尖 Trigger + TouchableObject + 捏取（HandInteractionRig，拇指+食指或 G 键）
 [x] 移除 VR/XR 依赖
 [x] 摄像机动态定位（Renderer bounds）
 
 待办:
 [ ] 调试坐标系映射（Axis Sign / Axis Remap 实测调参）
-[ ] Unity → Arduino 串口触觉指令发送
-[ ] 抓取判定逻辑（多指协同）
+[ ] 指尖球 `Tip Radius` / `Tip Local Offset` 与物体尺寸匹配
+[ ] Unity → Arduino 串口触觉指令发送（可接 TouchableObject 的 UnityEvent）
+[ ] 抓取判定增强（多指同时接触、力度阈值等）
 [ ] DRV2605 震动模式可配置化
 [ ] 确认弯曲轴方向并微调 bendAxis / maxBendAngle
 [ ] 场景美化与演示物体
