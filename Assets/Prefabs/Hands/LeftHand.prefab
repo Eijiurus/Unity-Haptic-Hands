@@ -1196,6 +1196,10 @@ MonoBehaviour:
     maxBendAngle: 90
   boneSuffix: .L
   smoothSpeed: 12
+  enableWristRotation: 1
+  wristSmoothSpeed: 10
+  axisSign: {x: -1, y: -1, z: 1}
+  axisRemap: {x: 0, y: 2, z: 1}
 --- !u!1 &3871187150524126004
 GameObject:
   m_ObjectHideFlags: 0

@@ -1,9 +1,10 @@
 using System;
 using UnityEngine;
+using Assets.Device;
 
 /// <summary>
-/// 根据 GloveDataReceiver 提供的五指弯曲值，直接旋转 Rigged Hand 骨骼。
-/// 骨骼按 Blender 标准命名自动查找（如 thumb.01.L, finger_index.01.L 等）。
+/// 根据 GloveDataReceiver 提供的五指弯曲值旋转手指骨骼，
+/// 根据 WitMotion WT9011DCL-BT50 传感器提供的姿态数据旋转手腕。
 /// </summary>
 public class DataGloveHandDriver : MonoBehaviour
 {
@@ -20,9 +21,29 @@ public class DataGloveHandDriver : MonoBehaviour
     [Tooltip("骨骼后缀，左手为 .L，右手为 .R")]
     [SerializeField] private string boneSuffix = ".L";
 
-    [Header("平滑")]
+    [Header("手指平滑")]
     [Tooltip("数值越大越平滑，但延迟也越大。设为 0 关闭平滑。")]
     [SerializeField, Range(0f, 30f)] private float smoothSpeed = 12f;
+
+    [Header("手腕姿态 (WitMotion 传感器)")]
+    [Tooltip("是否启用蓝牙传感器控制手腕旋转")]
+    public bool enableWristRotation = true;
+
+    [Tooltip("手腕旋转平滑速度")]
+    [SerializeField, Range(1f, 30f)] private float wristSmoothSpeed = 10f;
+
+    [Tooltip("坐标系映射：传感器轴 → Unity 轴的符号翻转\n" +
+             "传感器右手坐标系与 Unity 左手坐标系不同，佩戴方向也会影响映射。\n" +
+             "如果旋转方向不对，尝试翻转各分量的正负号。")]
+    [SerializeField] private Vector3 axisSign = new Vector3(-1f, -1f, 1f);
+
+    [Tooltip("坐标系映射：传感器 XYZ → Unity XYZ 的轴重排\n" +
+             "0=传感器X, 1=传感器Y, 2=传感器Z\n" +
+             "默认 (0,2,1) 表示：Unity.X=传感器.X, Unity.Y=传感器.Z, Unity.Z=传感器.Y")]
+    [SerializeField] private Vector3Int axisRemap = new Vector3Int(0, 2, 1);
+
+    private Quaternion _initialWristRotation;
+    private Quaternion _currentWristRotation;
 
     private FingerConfig[] _fingers;
     private float[] _currentValues = new float[5];
@@ -34,27 +55,55 @@ public class DataGloveHandDriver : MonoBehaviour
         _fingers = new[] { thumb, index, middle, ring, pinky };
         AutoFindBones();
         CacheInitialRotations();
+        _initialWristRotation = transform.localRotation;
+        _currentWristRotation = Quaternion.identity;
     }
 
     void Update()
     {
-        if (!_bonesReady || gloveData == null) return;
-
-        for (int i = 0; i < 5; i++)
+        if (_bonesReady && gloveData != null)
         {
-            float target = gloveData.FingerValues[i];
-            _currentValues[i] = smoothSpeed > 0
-                ? Mathf.Lerp(_currentValues[i], target, Time.deltaTime * smoothSpeed)
-                : target;
+            for (int i = 0; i < 5; i++)
+            {
+                float target = gloveData.FingerValues[i];
+                _currentValues[i] = smoothSpeed > 0
+                    ? Mathf.Lerp(_currentValues[i], target, Time.deltaTime * smoothSpeed)
+                    : target;
+                ApplyFingerBend(i, _currentValues[i]);
+            }
+        }
 
-            ApplyFingerBend(i, _currentValues[i]);
+        if (enableWristRotation)
+        {
+            ApplyWristRotation();
         }
     }
 
     /// <summary>
-    /// 在当前 GameObject 的子层级中按名称自动查找骨骼 Transform。
-    /// 命名规则：{boneName}.01{suffix}, {boneName}.02{suffix}, {boneName}.03{suffix}
+    /// 从 WitMotion SDK 获取欧拉角并应用到手腕根节点。
+    /// SDK 的 DeviceModel 通过 GetDeviceData("AngX"/"AngY"/"AngZ") 提供欧拉角。
     /// </summary>
+    private void ApplyWristRotation()
+    {
+        DeviceModel wtDevice = DevicesManager.Instance.GetCurrentDevice();
+        if (wtDevice == null || !wtDevice.isOpen) return;
+
+        float angX = (float)wtDevice.GetDeviceData("AngX");
+        float angY = (float)wtDevice.GetDeviceData("AngY");
+        float angZ = (float)wtDevice.GetDeviceData("AngZ");
+
+        float[] sensorAngles = { angX, angY, angZ };
+        float ux = sensorAngles[axisRemap.x] * axisSign.x;
+        float uy = sensorAngles[axisRemap.y] * axisSign.y;
+        float uz = sensorAngles[axisRemap.z] * axisSign.z;
+
+        Quaternion targetRot = Quaternion.Euler(ux, uy, uz);
+        _currentWristRotation = Quaternion.Slerp(_currentWristRotation, targetRot,
+            Time.deltaTime * wristSmoothSpeed);
+
+        transform.localRotation = _initialWristRotation * _currentWristRotation;
+    }
+
     public void AutoFindBones()
     {
         if (_fingers == null)

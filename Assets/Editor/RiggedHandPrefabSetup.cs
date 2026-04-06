@@ -40,13 +40,14 @@ public class RiggedHandPrefabSetup : EditorWindow
             "自动配置完成！\n\n" +
             "✔ 左手 Prefab 已生成（右手网格已禁用）\n" +
             "✔ 摄像机将在运行时自动对准手部\n" +
-            "✔ GloveDataReceiver 已连接（键盘模拟模式）\n\n" +
+            "✔ GloveDataReceiver 已连接（键盘模拟模式）\n" +
+            "✔ WitMotionConnector 已添加（自动扫描蓝牙传感器）\n\n" +
             "按 Play 后：\n" +
             "  · 摄像机自动对准手部模型\n" +
             "  · 按 1-5 键：单指弯曲\n" +
             "  · 按 Space：握拳\n\n" +
-            "手指正常后，取消勾选 GloveManager 的\n" +
-            "Use Keyboard Simulation 切换到 Arduino 数据。",
+            "连接手套：取消勾选 Use Keyboard Simulation\n" +
+            "连接姿态传感器：开启 WT9011DCL-BT50 电源即可",
             "好的");
     }
 
@@ -169,6 +170,7 @@ public class RiggedHandPrefabSetup : EditorWindow
 
         GameObject gloveManager = new GameObject("GloveManager");
         GloveDataReceiver receiver = gloveManager.AddComponent<GloveDataReceiver>();
+        gloveManager.AddComponent<WitMotionConnector>();
 
         WireGloveData(leftInScene, receiver);
 
