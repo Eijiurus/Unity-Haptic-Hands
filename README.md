@@ -1,6 +1,6 @@
 # 基于数据手套的虚拟手交互与触觉反馈系统
 
-> 本科毕业设计 · 通过 Elastreme Sense Manu-5D 数据手套采集手指弯曲数据，驱动 Unity 虚拟手实时运动；通过 WitMotion WT9011DCL-BT50 九轴传感器获取手腕姿态，同步手部空间旋转；抓取交互时通过 Arduino + DRV2605 触觉芯片产生震动反馈。
+> 本科毕业设计 · 通过 Elastreme Sense Manu-5D 数据手套采集手指弯曲数据，驱动 Unity 虚拟手实时运动；通过 WitMotion WT9011DCL-BT50 传感器获取手部位姿（位置/旋转），在 Unity 中驱动手部空间运动（当前代码已稳定接入旋转通道）；抓取交互时通过 Arduino + DRV2605 触觉芯片产生震动反馈。
 
 ---
 
@@ -39,9 +39,9 @@ flowchart LR
 | 数据源 | 传输方式 | 提供的数据 | 控制目标 |
 |--------|---------|-----------|---------|
 | Manu-5D 手套 | 蓝牙→串口→SensorBridge.py→UDP | 五指弯曲度 (0-1800) | 15 个手指骨骼关节旋转 |
-| WT9011DCL-BT50 | BLE 蓝牙→WitMotion SDK→Unity | 欧拉角 AngX/Y/Z | 手腕整体空间旋转 |
+| WT9011DCL-BT50 | BLE 蓝牙→WitMotion SDK→Unity | 位姿相关数据（当前主用 AngX/Y/Z） | 手部位姿控制（当前主用手腕旋转） |
 
-两路数据在 `DataGloveHandDriver` 中融合：手指弯曲来自 `GloveDataReceiver`，手腕旋转来自 `DevicesManager`。
+两路数据在运行时融合：手指弯曲来自 `GloveDataReceiver`；WitMotion 作为手部位姿来源，其中当前代码路径主用 `DataGloveHandDriver` 读取 `DevicesManager` 的欧拉角驱动手腕旋转。
 
 ---
 
@@ -194,13 +194,28 @@ My project/
 - **挂载位置**：`LeftHand` Prefab 的根对象上
 - **双重职责**：
   1. **手指弯曲**：读取 `GloveDataReceiver.FingerValues`，旋转 15 个骨骼关节
-  2. **手腕旋转**：读取 WitMotion SDK 的 `DeviceModel.GetDeviceData("AngX/Y/Z")`，通过欧拉角→四元数转换控制手部根节点旋转
+  2. **位姿驱动（旋转+位置）**：
+     - 旋转：读取 `DeviceModel.GetDeviceData("AngX/Y/Z")`，控制手腕根节点旋转
+     - 位置：读取 `DeviceModel.GetDeviceData("AccX/Y/Z")`，经死区+阻尼积分估算相对位移并驱动手腕位置
 - **坐标系映射**：Inspector 中可调 `Axis Sign`、`Axis Remap`，适配传感器佩戴方向
 - **手腕灵敏度与稳定**（均可在 Inspector 调整，无需改代码）：
-  - `Wrist Angle Scale`：整体缩小传感器角度对手模的影响（**降低灵敏度**），默认约 `0.55`，越小越「稳」、动作幅度越小
+  - `Wrist Angle Scale`：整体缩小传感器角度对手模的影响（**降低旋转灵敏度**），默认约 `0.2`，越小越「稳」、动作幅度越小
+  - `Wrist Rotation Deadzone`：旋转死区（度），小于阈值的角度变化直接忽略，用于“平移时尽量不转腕”
   - `Wrist Smooth Speed`：四元数插值速度，**越小越不飘**、延迟略增，默认约 `6`
   - `Wrist Euler Filter Speed`：对欧拉角再做低通滤波，减轻抖动；设为 `0` 可关闭
-- **其它**：`enableWristRotation` 开关手腕跟随；手指弯曲仍由 `smoothSpeed` 控制
+  - `Wrist Position Gain` / `Wrist Position Smooth Speed`：提高后位移响应更明显，形成“位置主导、旋转次要”的操作手感
+- **其它**：`enableWristRotation` / `enableWristPosition` 可独立开关旋转与位置；若位置漂移可调用 `ResetWristPositionOffset()` 归零
+- **键盘移动（调试）**：`DataGloveHandDriver` 支持 `W/A/S/D` 平移、`Q/E` 上下移动手位置，`R` 归零位置偏移（可与 WitMotion 位置通道叠加）
+- **位置优先推荐参数（位移大、旋转小）**：
+  - `Wrist Angle Scale = 0.1`
+  - `Wrist Rotation Deadzone = 12`
+  - `Wrist Smooth Speed = 3`
+  - `Wrist Euler Filter Speed = 18`
+  - `Wrist Position Gain = 2.2`
+  - `Wrist Position Deadzone = 0.004`
+  - `Wrist Position Smooth Speed = 22`
+  - `Wrist Velocity Damping = 2.2`
+  - `Wrist Max Offset = 0.55`
 
 #### `Scripts/WitMotionConnector.cs` — 姿态传感器管理
 

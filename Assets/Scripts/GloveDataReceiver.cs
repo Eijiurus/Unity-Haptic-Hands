@@ -23,7 +23,7 @@ public class GloveDataReceiver : MonoBehaviour
 {
     [Header("数据源模式")]
     [Tooltip("勾选后使用键盘模拟手指弯曲（1-5 键），无需连接硬件")]
-    [SerializeField] private bool useKeyboardSimulation = true;
+    [SerializeField] private bool useKeyboardSimulation = false;
 
     [Header("UDP 设置（接收 SensorBridge.py 数据）")]
     [Tooltip("SensorBridge.py 发送的 UDP 端口")]
