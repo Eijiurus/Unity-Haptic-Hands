@@ -84,7 +84,10 @@ public class DataGloveHandDriver : MonoBehaviour
     [SerializeField, Range(0.1f, 3f)] private float keyboardMoveSpeed = 0.9f;
 
     [Tooltip("键盘偏移最大范围（米）")]
-    [SerializeField, Range(0.05f, 1f)] private float keyboardMaxOffset = 0.4f;
+    [SerializeField, Range(0.05f, 3f)] private float keyboardMaxOffset = 1.5f;
+
+    [Tooltip("是否限制键盘位移范围（关闭后可持续移动）")]
+    [SerializeField] private bool limitKeyboardOffset = false;
 
     private Quaternion _initialWristRotation;
     private Quaternion _currentWristRotation;
@@ -94,6 +97,8 @@ public class DataGloveHandDriver : MonoBehaviour
     private Vector3 _currentWristOffset;
     private Vector3 _wristVelocity;
     private Vector3 _keyboardOffset;
+    private Vector3 _editorInjectedInput;
+    private bool _editorResetRequested;
 
     private FingerConfig[] _fingers;
     private float[] _currentValues = new float[5];
@@ -233,25 +238,81 @@ public class DataGloveHandDriver : MonoBehaviour
         float y = 0f;
         float z = 0f;
 
-        if (Input.GetKey(KeyCode.A)) x -= 1f;
-        if (Input.GetKey(KeyCode.D)) x += 1f;
-        if (Input.GetKey(KeyCode.Q)) y += 1f;
-        if (Input.GetKey(KeyCode.E)) y -= 1f;
-        if (Input.GetKey(KeyCode.W)) z += 1f;
-        if (Input.GetKey(KeyCode.S)) z -= 1f;
+        if (IsMoveLeftPressed()) x -= 1f;
+        if (IsMoveRightPressed()) x += 1f;
+        if (IsMoveUpPressed()) y += 1f;
+        if (IsMoveDownPressed()) y -= 1f;
+        if (IsMoveForwardPressed()) z += 1f;
+        if (IsMoveBackPressed()) z -= 1f;
 
         Vector3 dir = new Vector3(x, y, z);
+
+#if UNITY_EDITOR
+        dir += _editorInjectedInput;
+#endif
+
         if (dir.sqrMagnitude > 1f) dir.Normalize();
 
         _keyboardOffset += dir * (keyboardMoveSpeed * Time.deltaTime);
-        _keyboardOffset = Vector3.ClampMagnitude(_keyboardOffset, keyboardMaxOffset);
+        if (limitKeyboardOffset)
+            _keyboardOffset = Vector3.ClampMagnitude(_keyboardOffset, keyboardMaxOffset);
 
-        if (Input.GetKeyDown(KeyCode.R))
+        if (IsResetPressedDown()
+#if UNITY_EDITOR
+            || _editorResetRequested
+#endif
+           )
         {
             _keyboardOffset = Vector3.zero;
             _currentWristOffset = Vector3.zero;
             _wristVelocity = Vector3.zero;
         }
+
+#if UNITY_EDITOR
+        _editorInjectedInput = Vector3.zero;
+        _editorResetRequested = false;
+#endif
+    }
+
+    private static bool IsMoveLeftPressed()
+    {
+        return Input.GetKey(KeyCode.A) || Input.GetKey(KeyCode.LeftArrow) ||
+               Input.GetKey(KeyCode.J) || Input.GetKey(KeyCode.Keypad4);
+    }
+
+    private static bool IsMoveRightPressed()
+    {
+        return Input.GetKey(KeyCode.D) || Input.GetKey(KeyCode.RightArrow) ||
+               Input.GetKey(KeyCode.L) || Input.GetKey(KeyCode.Keypad6);
+    }
+
+    private static bool IsMoveForwardPressed()
+    {
+        return Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow) ||
+               Input.GetKey(KeyCode.I) || Input.GetKey(KeyCode.Keypad8);
+    }
+
+    private static bool IsMoveBackPressed()
+    {
+        return Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.DownArrow) ||
+               Input.GetKey(KeyCode.K) || Input.GetKey(KeyCode.Keypad2);
+    }
+
+    private static bool IsMoveUpPressed()
+    {
+        return Input.GetKey(KeyCode.Q) || Input.GetKey(KeyCode.PageUp) ||
+               Input.GetKey(KeyCode.U) || Input.GetKey(KeyCode.Keypad9);
+    }
+
+    private static bool IsMoveDownPressed()
+    {
+        return Input.GetKey(KeyCode.E) || Input.GetKey(KeyCode.PageDown) ||
+               Input.GetKey(KeyCode.O) || Input.GetKey(KeyCode.Keypad3);
+    }
+
+    private static bool IsResetPressedDown()
+    {
+        return Input.GetKeyDown(KeyCode.R) || Input.GetKeyDown(KeyCode.P) || Input.GetKeyDown(KeyCode.Keypad0);
     }
 
     private void ApplyFinalWristPosition()
@@ -269,6 +330,14 @@ public class DataGloveHandDriver : MonoBehaviour
         _keyboardOffset = Vector3.zero;
         transform.localPosition = _initialWristPosition;
     }
+
+#if UNITY_EDITOR
+    public void SetEditorKeyboardInput(Vector3 moveDir, bool reset)
+    {
+        _editorInjectedInput = moveDir;
+        if (reset) _editorResetRequested = true;
+    }
+#endif
 
     public void AutoFindBones()
     {

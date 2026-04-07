@@ -184,7 +184,7 @@ My project/
 
 - **挂载位置**：场景中的 `GloveManager` 对象
 - **两种模式**：
-  - **键盘模拟**（默认开启）：按 1-5 键弯曲对应手指，Space 握拳
+  - **键盘模拟**：按 1-5 键弯曲对应手指，Space 握拳
   - **UDP 接收**：取消勾选 `Use Keyboard Simulation` 后，监听 UDP 端口
 - **数据处理**：解析前 5 个值（0-1800），归一化为 0-1，自动反转通道顺序
 - **输出**：`FingerValues[5]` 数组
@@ -206,6 +206,8 @@ My project/
   - `Wrist Position Gain` / `Wrist Position Smooth Speed`：提高后位移响应更明显，形成“位置主导、旋转次要”的操作手感
 - **其它**：`enableWristRotation` / `enableWristPosition` 可独立开关旋转与位置；若位置漂移可调用 `ResetWristPositionOffset()` 归零
 - **键盘移动（调试）**：`DataGloveHandDriver` 支持 `W/A/S/D` 平移、`Q/E` 上下移动手位置，`R` 归零位置偏移（可与 WitMotion 位置通道叠加）
+- **键盘移动范围**：`Limit Keyboard Offset` 关闭时可持续移动；开启时受 `Keyboard Max Offset` 限制（单位：米）
+- **Scene 视图按键桥接**：`Assets/Editor/SceneViewHandKeyboardBridge.cs` 已启用；Play 时即使焦点在 Scene 视图，也可移动手。若 `W/E/R` 被 Unity 工具热键占用，改用 `I/J/K/L`、`U/O`、小键盘 `8/4/2/6/9/3`，重置用 `P`（或小键盘 `0`）
 - **位置优先推荐参数（位移大、旋转小）**：
   - `Wrist Angle Scale = 0.1`
   - `Wrist Rotation Deadzone = 12`
@@ -235,9 +237,16 @@ My project/
 
 - **挂载位置**：`LeftHand` 根物体（`Setup Rigged Hand Prefab` 已写入 Prefab，并自动绑定 `GloveDataReceiver`）
 - **原理**：在 `thumb.03` / `finger_*.03` 等远端骨骼下生成**球形 Trigger**；左手根节点带 **Kinematic Rigidbody**，与带 **Rigidbody + 非 Trigger Collider** 的物体产生触发检测
-- **捏取条件**：**拇指 + 食指**弯曲值 ≥ `Pinch Threshold`（0~1），或按住 **G 键**（便于无手套测试）；从当前接触的 `TouchableObject` 中选距离食指指尖最近的一个
-- **释放**：松开捏取（手指伸直或松开 G）后物体恢复非 Kinematic、脱离父物体
-- **调参**：`Tip Radius`、`Tip Local Offset`（指尖球位置）、`Pinch Threshold`
+- **宽松抓握条件**（满足其一即可）：
+  - `G` 键按下（无手套调试）
+  - 拇指+食指弯曲达到 `Pinch Threshold`
+  - 拇指尖/食指尖距离小于 `Pinch Distance`
+  - 任意手指弯曲超过 `Bent Grab Threshold`（触碰即抓）
+  - 五指平均弯曲超过 `Fist Grip Threshold`（握拳抓取）
+- **释放条件**：弯曲与指尖距离均回到释放区间后释放（`Release Threshold` + `Release Distance` 回差抑制抖动）
+- **抓取挂载点**：默认 `Attach To Palm = true`，抓取后物体跟随手掌移动并保持相对位姿
+- **防穿透**：可开启 `Enable Physical Tip Collision`，为每个指尖添加非 Trigger 球形碰撞体，减轻“手指穿进物体”的视觉问题
+- **自动绑定与调试**：运行时自动查找 `GloveDataReceiver`；`Show Grab Debug Log` 会输出“已接触未抓取/抓取成功/释放”日志，便于排错
 
 #### `Scripts/TouchableObject.cs` — 可交互物体
 
@@ -250,7 +259,7 @@ My project/
 
 1. **手部**：确保 `LeftHand` 上有 `HandInteractionRig`（重新运行一次 `Tools → Setup Rigged Hand Prefab` 可补全并连接 `gloveData`）。
 2. **场景物体**：在立方体等物体上添加 **`TouchableObject`**（若已有 Rigidbody/Collider 会自动配合；`SampleScene` 中的 **GrabbableCube** 已挂载示例）。
-3. **操作**：移动手腕与手指使指尖靠近物体 → 应看到**高亮**；**拇指+食指同时弯曲**（或按住 **G**）→ **捏取**并随食指指尖移动；松手 → **放下**。
+3. **操作**：移动手腕与手指使指尖靠近物体 → 应看到**高亮**；触碰后进入弯曲/捏合状态（或按住 **G**）→ **抓取**并随手掌移动；伸直/松开后 → **放下**。
 4. **真机触觉**：在 `TouchableObject` 的 **`onTouchEnter` / `onGrabbed`** 上挂接你的串口发送脚本，即可在「碰到 / 抓住」时驱动 Arduino + DRV2605（与 README 系统架构中的下行链路一致）。
 
 ---
