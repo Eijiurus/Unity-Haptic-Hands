@@ -1,355 +1,197 @@
 # 基于数据手套的虚拟手交互与触觉反馈系统
 
-> 本科毕业设计 · 通过 Elastreme Sense Manu-5D 数据手套采集手指弯曲数据，驱动 Unity 虚拟手实时运动；通过 WitMotion WT9011DCL-BT50 传感器获取手部位姿（位置/旋转），在 Unity 中驱动手部空间运动（当前代码已稳定接入旋转通道）；抓取交互时通过 Arduino + DRV2605 触觉芯片产生震动反馈。
+> 本科毕业设计：用 **Elastreme Sense Manu-5D** 数据手套采集五指弯曲，经 **Python 串口桥** 以 UDP 送入 Unity，驱动 **Rigged Hand** 骨骼；用 **WitMotion WT9011DCL-BT50**（BLE）提供手腕姿态与相对位移估计；场景内为 **非 XR** 的 Trigger / Rigidbody 交互；触觉侧为 **Arduino + DRV2605 + LRA**，仓库根目录提供 **HID** 测试脚本验证双路马达板。
+
+阅读本文后，你应能回答：**数据从哪来、Unity 里谁在处理、没硬件怎么调试、蓝牙与 Python 各负责什么**。
 
 ---
 
-## 文档维护约定
+## 1. 项目做什么
 
-本仓库以根目录 **`README.md`** 作为**项目说明与变更备忘的主文档**。后续凡有实质改动（例如脚本增删、数据链路变化、硬件接线、Unity Inspector 新增/默认参数、排错经验），**请在本文件中同步更新**，便于日后查阅，也便于协作或 AI 辅助时直接引用。
+| 能力 | 实现要点 |
+|------|-----------|
+| 手指跟随 | 手套 → 串口 → `SensorBridge.py` → UDP → `GloveDataReceiver` → `DataGloveHandDriver` 旋转 5 指骨骼 |
+| 手腕姿态与位移 | WT9011 BLE → `WitMotionConnector` + `DeviceModel` 解析 → `DataGloveHandDriver` 映射欧拉角与加速度积分位移 |
+| 抓取与碰触 | `HandInteractionRig` 在指尖挂 Trigger；`FingerTipRelay` 转发事件；`TouchableObject` 提供高亮与 `UnityEvent`（可接触觉串口等） |
+| 场景与资源 | `RiggedHandPrefabSetup` 一键从 FBX 生成左手 Prefab 并布置场景；`HandSceneSetup` 让主摄像机跟随手部包围盒 |
+| 无手套调试 | `GloveDataReceiver` 的键盘模拟（1–5 单指、Space 握拳）；`SceneViewHandKeyboardBridge` 在 Scene 视图用 WASD 等微调手部位移（运行中） |
 
-**建议务必更新 README 的情况**：新增或移除核心脚本/SDK、修改 `SensorBridge` / UDP / BLE 流程、调整 `DataGloveHandDriver` / `WitMotionConnector` / **手部交互与拿捏**相关逻辑、记录新的已知问题与解决办法。
+本项目 **未** 在 `Packages/manifest.json` 中引入 **XR Interaction Toolkit**；交互基于自定义 Trigger / 捏合阈值与物理刚体。
 
 ---
 
-## 系统架构
+## 2. 系统架构与数据流
 
 ```mermaid
 flowchart LR
-    A["🧤 Manu-5D 数据手套\n（五指弯曲传感器）"]
-    B["🐍 SensorBridge.py\n（串口→UDP 桥接）"]
-    C["🎮 Unity 2022\nGloveDataReceiver\nDataGloveHandDriver"]
-
-    G["📡 WT9011DCL-BT50\n（九轴姿态传感器）"]
-    H["🔵 WitMotion BLE SDK\n（蓝牙直连 Unity）"]
-
-    E["⚡ Arduino\n（触觉驱动）"]
-    F["🔊 DRV2605 → LRA\n震动反馈"]
-
-    A -->|"蓝牙 115200"| B
-    B -->|"UDP 5005"| C
-    G -->|"BLE 蓝牙"| H
-    H -->|"欧拉角 AngX/Y/Z"| C
-    C -->|"串口下行"| E
-    E -->|I²C| F
+  subgraph HW[硬件]
+    Glove[Manu-5D 手套]
+    IMU[WT9011DCL-BT50]
+    Haptic[HID 触觉板 / Arduino+DRV2605]
+  end
+  subgraph PC[PC]
+    Bridge[SensorBridge.py\n串口→UDP]
+    HID[test_hid / test_vibrate.py]
+  end
+  subgraph Unity[Unity 2022.3 LTS]
+    Recv[GloveDataReceiver]
+    Drv[DataGloveHandDriver]
+    Wit[WitMotionConnector]
+    Dev[DeviceModel + BleApi]
+    Rig[HandInteractionRig]
+  end
+  Glove --> Bridge --> Recv --> Drv
+  IMU --> Dev --> Drv
+  Wit --> Dev
+  Rig --> Drv
+  Haptic -.-> HID
 ```
 
-### 两路数据融合
+**三条主通道简述：**
 
-| 数据源 | 传输方式 | 提供的数据 | 控制目标 |
-|--------|---------|-----------|---------|
-| Manu-5D 手套 | 蓝牙→串口→SensorBridge.py→UDP | 五指弯曲度 (0-1800) | 15 个手指骨骼关节旋转 |
-| WT9011DCL-BT50 | BLE 蓝牙→WitMotion SDK→Unity | 位姿相关数据（当前主用 AngX/Y/Z） | 手部位姿控制（当前主用手腕旋转） |
-
-两路数据在运行时融合：手指弯曲来自 `GloveDataReceiver`；WitMotion 作为手部位姿来源，其中当前代码路径主用 `DataGloveHandDriver` 读取 `DevicesManager` 的欧拉角驱动手腕旋转。
+1. **手套**：蓝牙虚拟串口（上位机或系统枚举为 COMx）→ `SensorBridge.py` 读行、去分号 → UDP `127.0.0.1:5005`（默认）→ `GloveDataReceiver` 解析 11 个逗号分隔数值中的前 5 个为弯曲（0–1800 对应 0°–180°），归一化后交给 `DataGloveHandDriver`。运行前请关闭占用串口的 **OneCOM** 等上位机，否则会与 Python 抢端口。
+2. **姿态传感器**：`WitMotionConnector` 使用 `Assets/Scripts/Bluetooth/BleApi`（WinRT 原生 `BleWinrtDll.dll`）持续轮询扫描，匹配名称含 **WT** 的设备并连接；数据经 `DeviceModel` 线程解析，供 `DataGloveHandDriver` 做手腕旋转与可选的加速度积分位移。项目中另有 `BlueScanner` / `BlueConnector` 通用扫描连接栈，当前 WT 流程以 `WitMotionConnector` 为主（避免短轮询漏设备）。
+3. **触觉**：游戏逻辑层可通过 `TouchableObject` 的事件扩展串口/USB；根目录 Python 脚本用于 **VID `0x674E` / PID `0x000A`** 的 HID 板直连测试（见下文）。
 
 ---
 
-## 核心文件一览
+## 3. 运行环境与依赖
 
-| 文件 | 一句话说明 | 角色 |
-|------|-----------|------|
-| `SensorBridge.py` | Python 脚本，读取手套蓝牙串口数据并通过 UDP 转发 | **数据桥接层** |
-| `GloveDataReceiver.cs` | 接收 UDP 数据（或键盘模拟），归一化为 0~1 | **数据输入层** |
-| `DataGloveHandDriver.cs` | 驱动手指骨骼旋转 + 手腕姿态同步 | **骨骼驱动层** |
-| `WitMotionConnector.cs` | 管理 WT9011DCL-BT50 蓝牙扫描/连接/断开 | **姿态传感器管理** |
-| `HandSceneSetup.cs` | 运行时自动计算网格位置并定位摄像机 | **场景管理层** |
-| `RiggedHandPrefabSetup.cs` | 编辑器工具，一键生成 Prefab 并放入场景 | **编辑器工具** |
-| `HandInteractionRig.cs` | 五指尖 Trigger + 捏取逻辑（拇指+食指弯曲或 G 键） | **手部物理交互** |
-| `TouchableObject.cs` | 可触摸/可拿捏物体（高亮 + UnityEvent，可接触觉串口） | **场景物体** |
-| `FingerTipRelay.cs` | 指尖 Trigger 转发给 `HandInteractionRig` | **辅助** |
+### 3.1 硬件（与代码假设一致）
 
-### SDK 文件（WitMotion 官方）
+- Elastreme Sense **Manu-5D** 数据手套（输出分号结尾的 ASCII 行，波特率默认 **115200**）
+- WitMotion **WT9011DCL-BT50**（BLE，广播名通常含 **WT**）
+- Windows PC + Unity 编辑器
+- 可选：HID 双路触觉板（上述 VID/PID）；或 Arduino + DRV2605 + LRA（固件/协议以你实际上位机为准）
 
-| 目录 | 说明 |
-|------|------|
-| `Scripts/Bluetooth/` | BLE 底层通信（BleApi、BlueScanner、BlueConnector） |
-| `Scripts/Device/` | 设备管理与数据解析（DevicesManager、DeviceModel） |
+### 3.2 软件版本
 
-### 文件间协作流程
+- **Unity**：`2022.3.62f3` LTS（见 `ProjectSettings/ProjectVersion.txt`）
+- **Python 3.x**：`pyserial`（`SensorBridge.py`）、`hid`（[`hidapi`](https://pypi.org/project/hidapi/)，用于 `test_hid.py` / `test_vibrate.py`）
+- **Arduino IDE**（若使用 Arduino 触觉方案）
 
-```
-运行时数据流：
+### 3.3 Unity 包说明
 
-  ┌─ 手指弯曲 ─────────────────────────────────────┐
-  │                                                  │
-  │  SensorBridge.py（外部 Python 进程）              │
-  │       │  UDP "1504,900,100,0,0,..."              │
-  │       ▼                                          │
-  │  GloveDataReceiver                               │
-  │       │  FingerValues[0..4] (0~1)                │
-  │       ▼                                          │
-  │  DataGloveHandDriver ──→ 旋转 15 个手指骨骼      │
-  │                                                  │
-  └──────────────────────────────────────────────────┘
-
-  ┌─ 手腕姿态 ─────────────────────────────────────┐
-  │                                                  │
-  │  WitMotionConnector                              │
-  │       │  扫描 BLE → 连接 WT9011DCL-BT50         │
-  │       ▼                                          │
-  │  WitMotion SDK (DevicesManager)                  │
-  │       │  AngX, AngY, AngZ 欧拉角                 │
-  │       ▼                                          │
-  │  DataGloveHandDriver ──→ 旋转手腕根节点          │
-  │                                                  │
-  └──────────────────────────────────────────────────┘
-
-  HandSceneSetup  ← 挂载在摄像机上，每帧跟踪手部位置
-```
+`Packages/manifest.json` 为 Unity 默认特性集（UGUI、Timeline、Visual Scripting 等），**不含** XR Interaction Toolkit。虚拟手依赖 **Physics**、**Animation 骨骼** 与自定义脚本。
 
 ---
 
-## 硬件需求
-
-| 硬件 | 说明 |
-|------|------|
-| Elastreme Sense Manu-5D | 无线数据手套，采集五根手指弯曲角度 |
-| WT9011DCL-BT50 | 九轴姿态传感器（蓝牙），获取手腕空间旋转 |
-| Arduino（Uno / Nano） | 触觉反馈驱动（I²C 控制 DRV2605） |
-| DRV2605 触觉驱动模块 | TI 触觉驱动芯片 |
-| 线性马达（LRA） | 与 DRV2605 配合，产生震动触觉反馈 |
-| PC（Windows 10/11） | 运行 Unity 编辑器 + SensorBridge.py |
-
----
-
-## 软件需求
-
-| 软件 | 版本 / 说明 |
-|------|------------|
-| Unity Editor | **2022.3.62f3** (LTS) |
-| API 兼容级别 | **.NET Framework**（WitMotion SDK 和串口通信依赖） |
-| Python | 3.x（运行 SensorBridge.py） |
-| Python 依赖 | `pip install pyserial` |
-| Arduino IDE | 1.8.x 或 2.x（烧录触觉反馈固件） |
-
-> 本项目已移除所有 VR/XR 相关包，不依赖 VR 头显。
-
----
-
-## 项目结构详解
+## 4. 仓库目录结构（与仓库一致）
 
 ```
 My project/
+├── README.md
+├── test_hid.py              # HID 单发振动测试（命令 0xAA）
+├── test_vibrate.py          # 遍历 DRV2605 效果 ID（命令 0xBB）
 ├── Assets/
 │   ├── Editor/
-│   │   └── RiggedHandPrefabSetup.cs     # 一键生成手部 Prefab 的编辑器工具
-│   │
+│   │   ├── RiggedHandPrefabSetup.cs   # 菜单 Tools → Setup Rigged Hand Prefab
+│   │   └── SceneViewHandKeyboardBridge.cs  # 运行时在 Scene 视图用键盘微调手部位置
 │   ├── Materials/
-│   │   └── HandSkin.mat                 # 手部皮肤材质（URP Lit）
-│   │
+│   │   └── HandSkin.mat
 │   ├── Models/
-│   │   └── Rigged Hand.fbx             # 带骨骼的手部模型（Blender 导出）
-│   │
+│   │   └── Rigged Hand.fbx
 │   ├── Prefabs/Hands/
-│   │   └── LeftHand.prefab             # 左手预制体（由工具自动生成）
-│   │
+│   │   └── LeftHand.prefab
 │   ├── Scenes/
-│   │   └── SampleScene.unity           # 主场景
-│   │
+│   │   └── SampleScene.unity
 │   └── Scripts/
-│       ├── SensorBridge.py             # Python 串口→UDP 桥接
-│       ├── GloveDataReceiver.cs        # UDP 数据接收 + 键盘模拟
-│       ├── DataGloveHandDriver.cs      # 骨骼驱动（手指弯曲 + 手腕姿态）
-│       ├── WitMotionConnector.cs       # WitMotion 蓝牙扫描/连接管理
-│       ├── HandInteractionRig.cs       # 指尖碰撞 + 捏取
-│       ├── TouchableObject.cs          # 可触摸/可拿物体
-│       ├── FingerTipRelay.cs           # 指尖 Trigger 转发
-│       ├── HandSceneSetup.cs           # 摄像机自动对准手部
-│       │
-│       ├── Bluetooth/                  # WitMotion BLE SDK
-│       │   ├── BleApi/
-│       │   │   ├── BleApi.cs           #   BLE 底层 API（调用 BleWinrtDll.dll）
-│       │   │   └── BleWinrtDll.dll     #   Windows BLE 原生通信库
-│       │   ├── BlueScanner.cs          #   蓝牙设备扫描
-│       │   └── BlueConnector.cs        #   蓝牙连接与数据接收
-│       │
-│       └── Device/                     # WitMotion 设备管理
-│           ├── DevicesManager.cs       #   设备列表管理（单例）
-│           └── DeviceModel.cs          #   传感器数据解析（Acc/Ang/Mag）
-│
-├── Packages/manifest.json
+│       ├── SensorBridge.py
+│       ├── GloveDataReceiver.cs
+│       ├── DataGloveHandDriver.cs
+│       ├── WitMotionConnector.cs
+│       ├── HandInteractionRig.cs
+│       ├── TouchableObject.cs
+│       ├── FingerTipRelay.cs      # 指尖 Trigger → HandInteractionRig
+│       ├── HandSceneSetup.cs      # 主摄像机对准手部
+│       ├── Bluetooth/
+│       │   ├── BlueConnector.cs   # GATT 连接与收包线程
+│       │   ├── BlueScanner.cs     # 通用 BLE 扫描（可与 WitMotionConnector 并存注意资源）
+│       │   └── BleApi/
+│       │       ├── BleApi.cs      # WinRT BLE 封装
+│       │       └── BleWinrtDll.dll
+│       └── Device/
+│           ├── DeviceModel.cs     # 单设备解析、线程、OnKeyUpdate
+│           └── DevicesManager.cs  # 多设备字典与当前设备
+├── Packages/
+│   └── manifest.json
 └── ProjectSettings/
 ```
 
-### 各文件详细说明
+---
 
-#### `Scripts/SensorBridge.py` — 数据桥接层
+## 5. 核心脚本职责速查
 
-- **运行方式**：在 Unity 外部独立运行 `python SensorBridge.py`
-- **功能**：读取手套蓝牙串口数据（115200 波特率），去掉末尾分号，通过 UDP 发送到 `127.0.0.1:5005`
-- **配置**：修改脚本顶部的 `SERIAL_PORT`（默认 COM3）和 `UDP_PORT`（默认 5005）
+| 组件 / 脚本 | 职责 |
+|-------------|------|
+| `SensorBridge.py` | 读手套串口一行 → 去掉末尾 `;` → UDP 发送整行字符串 |
+| `GloveDataReceiver.cs` | UDP 或键盘模拟 → 五指 0–1 弯曲数组；通道顺序可 `reverseFingerOrder` |
+| `DataGloveHandDriver.cs` | 根据弯曲旋转骨骼；根据 `DeviceModel` 数据做手腕旋转/位移及调试键盘叠加 |
+| `WitMotionConnector.cs` | WT 专用：长时扫描、`connectable=False` 时仍可选连接、连接 `DeviceModel` |
+| `BleApi` + `BlueConnector` + `DeviceModel` | Windows BLE 底层、连接与字节流解析 |
+| `HandInteractionRig.cs` | 指尖 Trigger、捏取/握拳阈值、吸附刚体；需根节点 **Kinematic Rigidbody** |
+| `FingerTipRelay.cs` | 挂在指尖球上，把 `OnTriggerEnter/Exit` 交给 `HandInteractionRig` |
+| `TouchableObject.cs` | 可触摸物体：高亮、`allowPinchGrab`、触摸/抓取 `UnityEvent` |
+| `HandSceneSetup.cs` | 挂主摄像机，`LateUpdate` 对准 `LeftHand` 渲染包围盒 |
+| `RiggedHandPrefabSetup.cs` | 编辑器一键生成左手 Prefab、布置场景、默认键盘手套模式 |
+| `SceneViewHandKeyboardBridge.cs` | 编辑模式下 Scene 视图焦点时 WASD/QE 等控制位移（配合 `DataGloveHandDriver` 键盘位姿开关） |
 
-#### `Scripts/GloveDataReceiver.cs` — 数据输入层
-
-- **挂载位置**：场景中的 `GloveManager` 对象
-- **两种模式**：
-  - **键盘模拟**：按 1-5 键弯曲对应手指，Space 握拳
-  - **UDP 接收**：取消勾选 `Use Keyboard Simulation` 后，监听 UDP 端口
-- **数据处理**：解析前 5 个值（0-1800），归一化为 0-1，自动反转通道顺序
-- **输出**：`FingerValues[5]` 数组
-
-#### `Scripts/DataGloveHandDriver.cs` — 骨骼驱动层
-
-- **挂载位置**：`LeftHand` Prefab 的根对象上
-- **双重职责**：
-  1. **手指弯曲**：读取 `GloveDataReceiver.FingerValues`，旋转 15 个骨骼关节
-  2. **位姿驱动（旋转+位置）**：
-     - 旋转：读取 `DeviceModel.GetDeviceData("AngX/Y/Z")`，控制手腕根节点旋转
-     - 位置：读取 `DeviceModel.GetDeviceData("AccX/Y/Z")`，经死区+阻尼积分估算相对位移并驱动手腕位置
-- **坐标系映射**：Inspector 中可调 `Axis Sign`、`Axis Remap`，适配传感器佩戴方向
-- **手腕灵敏度与稳定**（均可在 Inspector 调整，无需改代码）：
-  - `Wrist Angle Scale`：整体缩小传感器角度对手模的影响（**降低旋转灵敏度**），默认约 `0.2`，越小越「稳」、动作幅度越小
-  - `Wrist Rotation Deadzone`：旋转死区（度），小于阈值的角度变化直接忽略，用于“平移时尽量不转腕”
-  - `Wrist Smooth Speed`：四元数插值速度，**越小越不飘**、延迟略增，默认约 `6`
-  - `Wrist Euler Filter Speed`：对欧拉角再做低通滤波，减轻抖动；设为 `0` 可关闭
-  - `Wrist Position Gain` / `Wrist Position Smooth Speed`：提高后位移响应更明显，形成“位置主导、旋转次要”的操作手感
-- **其它**：`enableWristRotation` / `enableWristPosition` 可独立开关旋转与位置；若位置漂移可调用 `ResetWristPositionOffset()` 归零
-- **键盘移动（调试）**：`DataGloveHandDriver` 支持 `W/A/S/D` 平移、`Q/E` 上下移动手位置，`R` 归零位置偏移（可与 WitMotion 位置通道叠加）
-- **键盘移动范围**：`Limit Keyboard Offset` 关闭时可持续移动；开启时受 `Keyboard Max Offset` 限制（单位：米）
-- **Scene 视图按键桥接**：`Assets/Editor/SceneViewHandKeyboardBridge.cs` 已启用；Play 时即使焦点在 Scene 视图，也可移动手。若 `W/E/R` 被 Unity 工具热键占用，改用 `I/J/K/L`、`U/O`、小键盘 `8/4/2/6/9/3`，重置用 `P`（或小键盘 `0`）
-- **位置优先推荐参数（位移大、旋转小）**：
-  - `Wrist Angle Scale = 0.1`
-  - `Wrist Rotation Deadzone = 12`
-  - `Wrist Smooth Speed = 3`
-  - `Wrist Euler Filter Speed = 18`
-  - `Wrist Position Gain = 2.2`
-  - `Wrist Position Deadzone = 0.004`
-  - `Wrist Position Smooth Speed = 22`
-  - `Wrist Velocity Damping = 2.2`
-  - `Wrist Max Offset = 0.55`
-
-#### `Scripts/WitMotionConnector.cs` — 姿态传感器管理
-
-- **挂载位置**：`GloveManager` 上（运行 `Tools → Setup Rigged Hand Prefab` 时会自动添加）
-- **实现要点**：不单独依赖 SDK 的 `BlueScanner` 单次轮询线程，改为在 `Update` 中持续调用 `BleApi.PollDevice()`，避免漏扫
-- **关键参数**：
-  - `Connect Even If Not Connectable`（默认开启）：Windows 常对 WitMotion 广播报 `connectable=False`，仍可 GATT 连接；关闭则只连 `connectable=True` 的设备
-  - `Verbose Scan Log`：在 Console 输出每条广播更新（前缀 `[仅扫描]`，区别于真正连接日志 `>>>`）
-- **API**：`Scan()` / `StopScan()` / `Disconnect()`，可绑定 UI 按钮
-
-#### `Scripts/HandSceneSetup.cs` — 场景管理层
-
-- **挂载位置**：主摄像机上
-- **功能**：通过 `Renderer.bounds` 计算手部网格实际位置，自动定位摄像机
-
-#### `Scripts/HandInteractionRig.cs` — 触摸与捏取（无 XR）
-
-- **挂载位置**：`LeftHand` 根物体（`Setup Rigged Hand Prefab` 已写入 Prefab，并自动绑定 `GloveDataReceiver`）
-- **原理**：在 `thumb.03` / `finger_*.03` 等远端骨骼下生成**球形 Trigger**；左手根节点带 **Kinematic Rigidbody**，与带 **Rigidbody + 非 Trigger Collider** 的物体产生触发检测
-- **宽松抓握条件**（满足其一即可）：
-  - `G` 键按下（无手套调试）
-  - 拇指+食指弯曲达到 `Pinch Threshold`
-  - 拇指尖/食指尖距离小于 `Pinch Distance`
-  - 任意手指弯曲超过 `Bent Grab Threshold`（触碰即抓）
-  - 五指平均弯曲超过 `Fist Grip Threshold`（握拳抓取）
-- **释放条件**：弯曲与指尖距离均回到释放区间后释放（`Release Threshold` + `Release Distance` 回差抑制抖动）
-- **抓取挂载点**：默认 `Attach To Palm = true`，抓取后物体跟随手掌移动并保持相对位姿
-- **防穿透**：可开启 `Enable Physical Tip Collision`，为每个指尖添加非 Trigger 球形碰撞体，减轻“手指穿进物体”的视觉问题
-- **自动绑定与调试**：运行时自动查找 `GloveDataReceiver`；`Show Grab Debug Log` 会输出“已接触未抓取/抓取成功/释放”日志，便于排错
-
-#### `Scripts/TouchableObject.cs` — 可交互物体
-
-- **要求**：同一物体上需有 **Rigidbody** + **Collider（非 Trigger）**
-- **反馈**：指尖进入时材质变色；可在 Inspector 中为 **`onTouchEnter` / `onGrabbed` / `onReleased`** 等 **UnityEvent** 绑定脚本，用于后续 **Arduino / DRV2605 串口触觉**（本仓库中可另写一个小脚本在 Event 里发串口）
+**手套数据格式**（`GloveDataReceiver` 注释）：一行如 `1504,900,100,0,0,0,0,0,0,0,0` — 前 5 个数为 CH1–CH5 弯曲（小指→拇指），脚本可反转为拇指在前再驱动骨骼。
 
 ---
 
-## 触摸、拿捏与后续触觉（Unity 内）
+## 6. 快速启动
 
-1. **手部**：确保 `LeftHand` 上有 `HandInteractionRig`（重新运行一次 `Tools → Setup Rigged Hand Prefab` 可补全并连接 `gloveData`）。
-2. **场景物体**：在立方体等物体上添加 **`TouchableObject`**（若已有 Rigidbody/Collider 会自动配合；`SampleScene` 中的 **GrabbableCube** 已挂载示例）。
-3. **操作**：移动手腕与手指使指尖靠近物体 → 应看到**高亮**；触碰后进入弯曲/捏合状态（或按住 **G**）→ **抓取**并随手掌移动；伸直/松开后 → **放下**。
-4. **真机触觉**：在 `TouchableObject` 的 **`onTouchEnter` / `onGrabbed`** 上挂接你的串口发送脚本，即可在「碰到 / 抓住」时驱动 Arduino + DRV2605（与 README 系统架构中的下行链路一致）。
+### 6.1 首次打开工程
 
----
+1. 用 **Unity Hub** 打开本文件夹，确认编辑器版本为 **2022.3.62f3**（或同 2022.3 系列，避免大版本差异）。
+2. 若场景中没有配置好的左手：菜单栏 **Tools → Setup Rigged Hand Prefab**，会生成 `Assets/Prefabs/Hands/LeftHand.prefab` 并配置 `SampleScene`（详见脚本对话框说明）。
+3. 打开 `Assets/Scenes/SampleScene.unity`。
 
-## 快速开始
+### 6.2 仅键盘调试（无手套、无传感器）
 
-### 1. 生成手部 Prefab（首次使用）
+1. 选中场景中带 `GloveDataReceiver` 的对象，勾选 **Use Keyboard Simulation**。
+2. Play：**1–5** 控制五指弯曲，**Space** 握拳；在 **Scene** 视图聚焦时可用 **WASD / QE / PageUp-Down** 等微调位置（`SceneViewHandKeyboardBridge`）。
+3. `DataGloveHandDriver` 中可单独开关手腕旋转/位置与键盘位置调试选项。
 
-```
-Tools → Setup Rigged Hand Prefab
-```
+### 6.3 连接真实手套
 
-### 2. 键盘模拟测试（无硬件）
+1. 在 `Assets/Scripts/SensorBridge.py` 中设置 `SERIAL_PORT`、`BAUD_RATE`、`UDP_PORT`，与 `GloveDataReceiver` 的 **udpPort** 一致。
+2. 终端执行：`python Assets/Scripts/SensorBridge.py`（或从你习惯的工作目录指向该文件）。
+3. 在 Unity 中 **取消勾选** `GloveDataReceiver` 的 **Use Keyboard Simulation**。
+4. Play，观察 Console 与手指动画。
 
-1. 点击 **Play**
-2. 按 1-5 键弯曲对应手指，Space 握拳
+### 6.4 连接 WitMotion 传感器
 
-### 3. 连接手套（手指弯曲）
-
-1. `pip install pyserial`
-2. 修改 `SensorBridge.py` 中 `SERIAL_PORT` 为手套蓝牙对应的 COM 口
-3. 运行 `python Assets/Scripts/SensorBridge.py`
-4. Unity 中取消勾选 `GloveManager` 上的 `Use Keyboard Simulation`
-5. Play
-
-### 4. 连接姿态传感器（手腕旋转）
-
-1. **关闭**维特官方上位机及其他占用该 BLE 的程序（同一时刻只能被一个应用连接）
-2. 开启 WT9011DCL-BT50 电源（指示灯闪烁）
-3. `GloveManager` 上应有 `WitMotionConnector`（可重新运行 `Tools → Setup Rigged Hand Prefab` 自动补齐）
-4. 建议保持 **`Connect Even If Not Connectable` 勾选**（见下方「修复记录」）
-5. Play；Console 出现 `>>> 正在发起 GATT 连接` / `>>> GATT 已调用 OpenDevice` 表示已发起连接
-6. 在 `LeftHand` 的 `DataGloveHandDriver` 上勾选 **`Enable Wrist Rotation`**
-
-> **旋转方向不对？** 在 `DataGloveHandDriver` 中调整 `Axis Sign` 与 `Axis Remap`。
-
-> **手腕太灵敏、发飘？** 减小 `Wrist Angle Scale`、略减小 `Wrist Smooth Speed`，或适当提高 `Wrist Euler Filter Speed`（详见上文「DataGloveHandDriver」一节）。
-
-> **官方文档提示**：模块固件中的 **`autoConnection` 不要打开**，否则易出现连接慢、失败；与 Unity 里脚本的「Auto Connect」不是同一项。
+1. 场景中确保有 `WitMotionConnector`（一键 Setup 会添加）。
+2. 打开 WT9011 电源，Windows 蓝牙正常；Play 后等待自动扫描/连接（可在 Inspector 调整 `autoScan`、`autoConnect`、`scanTimeout` 等）。
+3. 若旋转轴反向或漂移，在 `DataGloveHandDriver` 中调节 **axisSign / axisRemap**、死区与平滑参数。
 
 ---
 
-## WitMotion BLE 连接问题与修复记录（备忘）
+## 7. 根目录 Python：HID 触觉测试
 
-集成过程中曾出现「扫不到设备」「扫到 WT901BLE67 却被跳过」「超时无设备」等现象，原因与对策如下。
+需要先安装：`pip install hid`（Windows 上通常还需可用的 USB/HID 驱动，必要时管理员权限运行）。
 
-| 现象 | 原因 | 修复方式 |
-|------|------|----------|
-| 早期日志显示「跳过非 WT 设备: WT901BLE67」 | 误把名称含 WT 但 `connectable=False` 的包当成不可连；且 BLE 名称与 `isConnectable` 往往**分多次回调**，不能单次判定 | 按 `deviceId` 累积 `name` / `isConnectable` 更新后再判断；并区分「仅扫描」与「已发起连接」日志 |
-| 扫描超时、始终无设备 | 仅用 SDK `BlueScanner` 时后台线程轮询窗口短，或 `BleApi.Quit()` 后立即 `StartDeviceScan()` 无缓冲 | 改用 **`Update` 中持续 `BleApi.PollDevice()`**；`Scan` 前 **`BleApi.Quit()` 后等待约 0.5s** 再 `StartDeviceScan()` |
-| Console 有广播日志但手不转 | 把「扫描到广播」误认为「已连接」；或 `connectable=False` 时从未调用 `OpenDevice()` | 明确日志前缀；默认开启 **`connectEvenIfNotConnectable`**，名称匹配 `WT` 即尝试 `OpenDevice()` |
-| 主线程外直接 `OpenDevice()` | 官方 Demo 在 UI（主线程）里连接 | 连接逻辑放在主线程（本脚本在判定后于 `Update` 中调用） |
+| 脚本 | 作用 |
+|------|------|
+| `test_hid.py` | 打开 VID/PID，发送 **0xAA** 命令触发左右路“射击”类振动，可选读 64 字节回包 |
+| `test_vibrate.py` | 循环发送 **0xBB** 命令，对左右路写入 DRV2605 波形编号（脚本内 `effects_to_test` 列表），每条约 2 秒 |
 
-**如何判断已真正发起连接**：以 Console 中是否出现 `>>> 正在发起 GATT 连接` 为准；仅有 `[仅扫描] 设备广播更新` 仅表示发现广播，不等于 GATT 已连上。
+若 VID/PID 或报文格式与你的硬件不一致，请按实际固件修改脚本常量。
 
 ---
 
-## 已知问题与待办
+## 8. 常见问题（排障）
 
-```
-已完成:
-[x] 五指独立弯曲控制（15 骨骼关节）
-[x] 骨骼自动查找绑定（Blender .L 命名规范）
-[x] SensorBridge.py 蓝牙串口→UDP 桥接
-[x] GloveDataReceiver UDP 接收 + 键盘模拟
-[x] WitMotion WT9011DCL-BT50 蓝牙连接集成（PollDevice 持续扫描 + connectable 标志 workaround）
-[x] 手腕姿态旋转（欧拉角，可配置坐标系映射）
-[x] 手腕灵敏度与滤波（Angle Scale / Smooth Speed / Euler Filter）
-[x] RiggedHandPrefabSetup 自动为 GloveManager 添加 WitMotionConnector
-[x] 指尖 Trigger + TouchableObject + 捏取（HandInteractionRig，拇指+食指或 G 键）
-[x] 移除 VR/XR 依赖
-[x] 摄像机动态定位（Renderer bounds）
-
-待办:
-[ ] 调试坐标系映射（Axis Sign / Axis Remap 实测调参）
-[ ] 指尖球 `Tip Radius` / `Tip Local Offset` 与物体尺寸匹配
-[ ] Unity → Arduino 串口触觉指令发送（可接 TouchableObject 的 UnityEvent）
-[ ] 抓取判定增强（多指同时接触、力度阈值等）
-[ ] DRV2605 震动模式可配置化
-[ ] 确认弯曲轴方向并微调 bendAxis / maxBendAngle
-[ ] 场景美化与演示物体
-[ ] 打包 Build 测试
-```
+- **手套无数据**：检查 COM 号、是否被 OneCOM 等占用、波特率 115200、`SensorBridge.py` 与 Unity 端口一致、防火墙是否拦截本机 UDP。
+- **BLE 搜不到 WT**：确认设备名广播含 WT、蓝牙已开、`scanTimeout` 足够；Windows 对 `connectable=False` 时可勾选 `WitMotionConnector` 的 **connectEvenIfNotConnectable**。
+- **抓不住物体**：确认 `TouchableObject` 带 **非 Trigger** 的 Collider + **Rigidbody**；`HandInteractionRig` 根节点有 **Kinematic Rigidbody**；调高 `grabAssistRadius` 或检查 `allowPinchGrab`。
+- **手指穿模**：尝试开启 `HandInteractionRig` 的 **enablePhysicalTipCollision** 并调节物理球半径。
 
 ---
 
-## 作者信息
+## 9. 维护建议
 
-| | |
-|--|--|
-| 项目类型 | 本科毕业设计 |
-| 开发环境 | Unity 2022.3.62f3 · Windows 10/11 · Python 3.x |
-| 指导方向 | 虚拟现实交互 · 触觉反馈 · 人机交互 |
+- 修改串口协议、UDP 格式、BLE UUID 或抓取逻辑时，请同步更新 **第 2、5、6、8 节** 与相关脚本顶部注释。
+- 新增场景、Prefab 或第三方插件时，在本 README 增加一行说明其角色，避免后续读者只在工程里“猜”。
