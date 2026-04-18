@@ -11,11 +11,11 @@ public class DataGloveHandDriver : MonoBehaviour
     [SerializeField] private GloveDataReceiver gloveData;
 
     [Header("手指骨骼配置")]
-    [SerializeField] private FingerConfig thumb  = new FingerConfig { boneName = "thumb",        bendAxis = new Vector3(0, 0, -1), maxBendAngle = 80f };
-    [SerializeField] private FingerConfig index  = new FingerConfig { boneName = "finger_index",  bendAxis = new Vector3(1, 0, 0),  maxBendAngle = 90f };
-    [SerializeField] private FingerConfig middle = new FingerConfig { boneName = "finger_middle", bendAxis = new Vector3(1, 0, 0),  maxBendAngle = 90f };
-    [SerializeField] private FingerConfig ring   = new FingerConfig { boneName = "finger_ring",   bendAxis = new Vector3(1, 0, 0),  maxBendAngle = 90f };
-    [SerializeField] private FingerConfig pinky  = new FingerConfig { boneName = "finger_pinky",  bendAxis = new Vector3(1, 0, 0),  maxBendAngle = 90f };
+    [SerializeField] private FingerConfig thumb = new FingerConfig { boneName = "thumb", bendAxis = new Vector3(0, 0, -1), maxBendAngle = 80f };
+    [SerializeField] private FingerConfig index = new FingerConfig { boneName = "finger_index", bendAxis = new Vector3(1, 0, 0), maxBendAngle = 90f };
+    [SerializeField] private FingerConfig middle = new FingerConfig { boneName = "finger_middle", bendAxis = new Vector3(1, 0, 0), maxBendAngle = 90f };
+    [SerializeField] private FingerConfig ring = new FingerConfig { boneName = "finger_ring", bendAxis = new Vector3(1, 0, 0), maxBendAngle = 90f };
+    [SerializeField] private FingerConfig pinky = new FingerConfig { boneName = "finger_pinky", bendAxis = new Vector3(1, 0, 0), maxBendAngle = 90f };
 
     [Header("骨骼查找")]
     [Tooltip("骨骼后缀，左手为 .L，右手为 .R")]
@@ -35,10 +35,13 @@ public class DataGloveHandDriver : MonoBehaviour
     [Tooltip("角度灵敏度：1=与传感器角度 1:1，调小则同样手腕动作虚拟手转得少、更不飘")]
     [SerializeField, Range(0.05f, 1f)] private float wristAngleScale = 0.1f;
 
+    [Tooltip("Yaw 灵敏度：用于弱化 Z 轴旋转漂移；1=不弱化")]
+    [SerializeField, Range(0f, 1f)] private float yawScale = 0.45f;
+
     [Tooltip("对传感器欧拉角再做一层低通（0=关闭）。略减抖动，略增延迟")]
     [SerializeField, Range(0f, 25f)] private float wristEulerFilterSpeed = 18f;
 
-    [Tooltip("旋转死区（度）：小于该角度变化会被忽略，减少平移时的误转动")]
+    [Tooltip("旋转死区（度）：先对原始角度做死区，再乘灵敏度，减少小角度抖动")]
     [SerializeField, Range(0f, 20f)] private float wristRotationDeadzone = 12f;
 
     [Tooltip("坐标系映射：传感器轴 → Unity 轴的符号翻转\n" +
@@ -58,11 +61,26 @@ public class DataGloveHandDriver : MonoBehaviour
     [Tooltip("位置跟随平滑速度：越小越稳，越大越跟手")]
     [SerializeField, Range(1f, 30f)] private float wristPositionSmoothSpeed = 22f;
 
-    [Tooltip("加速度积分增益：越大位移变化越明显")]
+    [Tooltip("线性加速度积分增益：越大位移变化越明显")]
     [SerializeField, Range(0.05f, 3f)] private float wristPositionGain = 2.2f;
 
-    [Tooltip("加速度死区（g）：抑制静止时微抖动")]
+    [Tooltip("线性加速度死区（g）：抑制重力补偿后的微小噪声")]
     [SerializeField, Range(0f, 0.2f)] private float wristPositionDeadzone = 0.004f;
+
+    [Tooltip("线性加速度低通速度（0=关闭）。用于抑制重力补偿后的高频抖动")]
+    [SerializeField, Range(0f, 30f)] private float wristLinearAccelFilterSpeed = 16f;
+
+    [Tooltip("角速度门控阈值（°/s）：转腕过快时暂停位置积分，避免假位移")]
+    [SerializeField, Range(10f, 1080f)] private float wristAngularVelocityGate = 120f;
+
+    [Tooltip("静止线性加速度阈值（g）：与角速度阈值共同用于 zero-velocity update")]
+    [SerializeField, Range(0.001f, 0.2f)] private float wristStillAccelerationThreshold = 0.025f;
+
+    [Tooltip("静止角速度阈值（°/s）：与线性加速度阈值共同用于 zero-velocity update")]
+    [SerializeField, Range(0.5f, 60f)] private float wristStillAngularSpeedThreshold = 6f;
+
+    [Tooltip("静止确认时间（秒）：连续满足静止条件后清零速度")]
+    [SerializeField, Range(0f, 1f)] private float wristStillConfirmTime = 0.12f;
 
     [Tooltip("速度阻尼：越大越快停下来，越不漂")]
     [SerializeField, Range(0f, 20f)] private float wristVelocityDamping = 2.2f;
@@ -91,17 +109,26 @@ public class DataGloveHandDriver : MonoBehaviour
 
     private Quaternion _initialWristRotation;
     private Quaternion _currentWristRotation;
-    private float _filtUx, _filtUy, _filtUz;
+    private Quaternion _displayTargetWristRotation = Quaternion.identity;
+    private Quaternion _compensationWristRotation = Quaternion.identity;
+    private Vector3 _filteredDisplayEuler;
+    private Vector3 _filteredCompensationEuler;
     private bool _wristEulerFilterPrimed;
+    private int _lastWristSensorFrame = -1;
+
     private Vector3 _initialWristPosition;
     private Vector3 _currentWristOffset;
     private Vector3 _wristVelocity;
+    private Vector3 _filteredLinearAcceleration;
+    private bool _linearAccelerationFilterPrimed;
+    private float _wristStillTimer;
+
     private Vector3 _keyboardOffset;
     private Vector3 _editorInjectedInput;
     private bool _editorResetRequested;
 
     private FingerConfig[] _fingers;
-    private float[] _currentValues = new float[5];
+    private readonly float[] _currentValues = new float[5];
     private Quaternion[][] _initialRotations;
     private bool _bonesReady;
 
@@ -110,13 +137,22 @@ public class DataGloveHandDriver : MonoBehaviour
         _fingers = new[] { thumb, index, middle, ring, pinky };
         AutoFindBones();
         CacheInitialRotations();
+
         _initialWristRotation = transform.localRotation;
         _currentWristRotation = Quaternion.identity;
-        _filtUx = _filtUy = _filtUz = 0f;
+        _displayTargetWristRotation = Quaternion.identity;
+        _compensationWristRotation = Quaternion.identity;
+        _filteredDisplayEuler = Vector3.zero;
+        _filteredCompensationEuler = Vector3.zero;
         _wristEulerFilterPrimed = false;
+        _lastWristSensorFrame = -1;
+
         _initialWristPosition = transform.localPosition;
         _currentWristOffset = Vector3.zero;
         _wristVelocity = Vector3.zero;
+        _filteredLinearAcceleration = Vector3.zero;
+        _linearAccelerationFilterPrimed = false;
+        _wristStillTimer = 0f;
         _keyboardOffset = Vector3.zero;
     }
 
@@ -127,25 +163,29 @@ public class DataGloveHandDriver : MonoBehaviour
             for (int i = 0; i < 5; i++)
             {
                 float target = gloveData.FingerValues[i];
-                _currentValues[i] = smoothSpeed > 0
+                _currentValues[i] = smoothSpeed > 0f
                     ? Mathf.Lerp(_currentValues[i], target, Time.deltaTime * smoothSpeed)
                     : target;
                 ApplyFingerBend(i, _currentValues[i]);
             }
         }
 
+        DeviceModel wtDevice = null;
+        if (enableWristRotation || enableWristPosition)
+        {
+            wtDevice = GetCurrentWristDevice();
+            if (wtDevice != null)
+                UpdateWristSensorState(wtDevice);
+        }
+
         if (enableWristRotation)
-        {
-            ApplyWristRotation();
-        }
+            ApplyWristRotation(wtDevice);
+
         if (enableWristPosition)
-        {
-            ApplyWristPosition();
-        }
+            ApplyWristPosition(wtDevice);
+
         if (enableKeyboardPositionControl)
-        {
             UpdateKeyboardPositionOffset();
-        }
 
         ApplyFinalWristPosition();
     }
@@ -154,48 +194,13 @@ public class DataGloveHandDriver : MonoBehaviour
     /// 从 WitMotion SDK 获取欧拉角并应用到手腕根节点。
     /// SDK 的 DeviceModel 通过 GetDeviceData("AngX"/"AngY"/"AngZ") 提供欧拉角。
     /// </summary>
-    private void ApplyWristRotation()
+    private void ApplyWristRotation(DeviceModel wtDevice)
     {
-        DeviceModel wtDevice = DevicesManager.Instance.GetCurrentDevice();
-        if (wtDevice == null || !wtDevice.isOpen) return;
+        if (wtDevice == null) return;
 
-        float angX = (float)wtDevice.GetDeviceData("AngX");
-        float angY = (float)wtDevice.GetDeviceData("AngY");
-        float angZ = (float)wtDevice.GetDeviceData("AngZ");
-
-        float[] sensorAngles = { angX, angY, angZ };
-        float ux = sensorAngles[axisRemap.x] * axisSign.x * wristAngleScale;
-        float uy = sensorAngles[axisRemap.y] * axisSign.y * wristAngleScale;
-        float uz = sensorAngles[axisRemap.z] * axisSign.z * wristAngleScale;
-
-        // Position-first mode: ignore tiny wrist angle changes to reduce unintended rotation.
-        ux = Mathf.Abs(ux) < wristRotationDeadzone ? 0f : ux;
-        uy = Mathf.Abs(uy) < wristRotationDeadzone ? 0f : uy;
-        uz = Mathf.Abs(uz) < wristRotationDeadzone ? 0f : uz;
-
-        if (wristEulerFilterSpeed > 0f)
-        {
-            if (!_wristEulerFilterPrimed)
-            {
-                _filtUx = ux;
-                _filtUy = uy;
-                _filtUz = uz;
-                _wristEulerFilterPrimed = true;
-            }
-            else
-            {
-                float t = Mathf.Clamp01(Time.deltaTime * wristEulerFilterSpeed);
-                _filtUx = Mathf.Lerp(_filtUx, ux, t);
-                _filtUy = Mathf.Lerp(_filtUy, uy, t);
-                _filtUz = Mathf.Lerp(_filtUz, uz, t);
-            }
-            ux = _filtUx;
-            uy = _filtUy;
-            uz = _filtUz;
-        }
-
-        Quaternion targetRot = Quaternion.Euler(ux, uy, uz);
-        _currentWristRotation = Quaternion.Slerp(_currentWristRotation, targetRot,
+        _currentWristRotation = Quaternion.Slerp(
+            _currentWristRotation,
+            _displayTargetWristRotation,
             Time.deltaTime * wristSmoothSpeed);
 
         transform.localRotation = _initialWristRotation * _currentWristRotation;
@@ -203,33 +208,158 @@ public class DataGloveHandDriver : MonoBehaviour
 
     /// <summary>
     /// 使用 WitMotion 的加速度数据估算手腕相对位移。
-    /// 注意：IMU 无绝对位置，长时间会漂移；建议在实验流程中定期归零。
+    /// 注意：IMU 无绝对位置，长时间会漂移；这里通过重力补偿、转腕门控和静止清速尽量抑制漂移。
     /// </summary>
-    private void ApplyWristPosition()
+    private void ApplyWristPosition(DeviceModel wtDevice)
     {
-        DeviceModel wtDevice = DevicesManager.Instance.GetCurrentDevice();
-        if (wtDevice == null || !wtDevice.isOpen) return;
+        if (wtDevice == null) return;
 
         float accX = (float)wtDevice.GetDeviceData("AccX");
         float accY = (float)wtDevice.GetDeviceData("AccY");
         float accZ = (float)wtDevice.GetDeviceData("AccZ");
 
-        float[] sensorAcc = { accX, accY, accZ };
-        float ux = sensorAcc[positionAxisRemap.x] * positionAxisSign.x;
-        float uy = sensorAcc[positionAxisRemap.y] * positionAxisSign.y;
-        float uz = sensorAcc[positionAxisRemap.z] * positionAxisSign.z;
+        float asX = (float)wtDevice.GetDeviceData("AsX");
+        float asY = (float)wtDevice.GetDeviceData("AsY");
+        float asZ = (float)wtDevice.GetDeviceData("AsZ");
 
-        Vector3 acc = new Vector3(ux, uy, uz);
-        acc.x = Mathf.Abs(acc.x) < wristPositionDeadzone ? 0f : acc.x;
-        acc.y = Mathf.Abs(acc.y) < wristPositionDeadzone ? 0f : acc.y;
-        acc.z = Mathf.Abs(acc.z) < wristPositionDeadzone ? 0f : acc.z;
+        Vector3 mappedSensorAcc = MapSensorVector(accX, accY, accZ, positionAxisRemap, positionAxisSign);
+        Vector3 mappedAngularVelocity = MapSensorVector(asX, asY, asZ, axisRemap, axisSign);
 
+        // 关键改动：先把传感器加速度旋到 Unity 参考系，再扣掉 1g 重力，
+        // 避免仅仅转动 IMU 时把重力投影误当作线位移。
+        Vector3 worldAccWithGravity = _compensationWristRotation * mappedSensorAcc;
+        Vector3 linearAcc = worldAccWithGravity - Vector3.up;
+
+        linearAcc = FilterLinearAcceleration(linearAcc);
+        linearAcc = ApplyComponentDeadzone(linearAcc, wristPositionDeadzone);
+
+        float angularSpeed = mappedAngularVelocity.magnitude;
         float dt = Time.deltaTime;
-        _wristVelocity += acc * (wristPositionGain * dt);
+
+        bool isStillCandidate =
+            linearAcc.magnitude <= wristStillAccelerationThreshold &&
+            angularSpeed <= wristStillAngularSpeedThreshold;
+
+        _wristStillTimer = isStillCandidate ? _wristStillTimer + dt : 0f;
+        bool isStill = _wristStillTimer >= wristStillConfirmTime;
+
+        if (isStill)
+        {
+            // 关键改动：静止检测通过后执行 zero-velocity update，强制清零残余速度。
+            _wristVelocity = Vector3.zero;
+            return;
+        }
+
+        if (angularSpeed >= wristAngularVelocityGate)
+        {
+            // 关键改动：转腕过快时暂停位置积分，仅保留阻尼，抑制“转一下就平移”的假位移。
+            _wristVelocity = Vector3.Lerp(_wristVelocity, Vector3.zero, dt * (wristVelocityDamping + 6f));
+            return;
+        }
+
+        _wristVelocity += linearAcc * (wristPositionGain * dt);
         _wristVelocity = Vector3.Lerp(_wristVelocity, Vector3.zero, dt * wristVelocityDamping);
         _currentWristOffset += _wristVelocity * dt;
         _currentWristOffset = Vector3.ClampMagnitude(_currentWristOffset, wristMaxOffset);
+    }
 
+    private DeviceModel GetCurrentWristDevice()
+    {
+        if (DevicesManager.Instance == null) return null;
+
+        DeviceModel wtDevice = DevicesManager.Instance.GetCurrentDevice();
+        if (wtDevice == null || !wtDevice.isOpen) return null;
+        return wtDevice;
+    }
+
+    private void UpdateWristSensorState(DeviceModel wtDevice)
+    {
+        if (wtDevice == null || _lastWristSensorFrame == Time.frameCount) return;
+
+        float angX = (float)wtDevice.GetDeviceData("AngX");
+        float angY = (float)wtDevice.GetDeviceData("AngY");
+        float angZ = (float)wtDevice.GetDeviceData("AngZ");
+
+        Vector3 mappedRawEuler = MapSensorVector(angX, angY, angZ, axisRemap, axisSign);
+
+        // 重力补偿使用“真实姿态”，不能乘 wristAngleScale，否则会残留大块重力分量。
+        Vector3 compensationEuler = new Vector3(
+            mappedRawEuler.x,
+            mappedRawEuler.y,
+            mappedRawEuler.z * yawScale);
+
+        // 关键改动：先对原始角度做死区，再乘显示灵敏度。
+        Vector3 displayRawEuler = ApplyComponentDeadzone(mappedRawEuler, wristRotationDeadzone);
+        Vector3 displayEuler = new Vector3(
+            displayRawEuler.x * wristAngleScale,
+            displayRawEuler.y * wristAngleScale,
+            displayRawEuler.z * wristAngleScale * yawScale);
+
+        if (wristEulerFilterSpeed > 0f)
+        {
+            if (!_wristEulerFilterPrimed)
+            {
+                _filteredCompensationEuler = compensationEuler;
+                _filteredDisplayEuler = displayEuler;
+                _wristEulerFilterPrimed = true;
+            }
+            else
+            {
+                float t = Mathf.Clamp01(Time.deltaTime * wristEulerFilterSpeed);
+                _filteredCompensationEuler = Vector3.Lerp(_filteredCompensationEuler, compensationEuler, t);
+                _filteredDisplayEuler = Vector3.Lerp(_filteredDisplayEuler, displayEuler, t);
+            }
+        }
+        else
+        {
+            _filteredCompensationEuler = compensationEuler;
+            _filteredDisplayEuler = displayEuler;
+            _wristEulerFilterPrimed = true;
+        }
+
+        _compensationWristRotation = Quaternion.Euler(_filteredCompensationEuler);
+        _displayTargetWristRotation = Quaternion.Euler(_filteredDisplayEuler);
+        _lastWristSensorFrame = Time.frameCount;
+    }
+
+    private Vector3 FilterLinearAcceleration(Vector3 linearAcc)
+    {
+        if (wristLinearAccelFilterSpeed <= 0f)
+        {
+            _filteredLinearAcceleration = linearAcc;
+            _linearAccelerationFilterPrimed = true;
+            return linearAcc;
+        }
+
+        if (!_linearAccelerationFilterPrimed)
+        {
+            _filteredLinearAcceleration = linearAcc;
+            _linearAccelerationFilterPrimed = true;
+        }
+        else
+        {
+            float t = Mathf.Clamp01(Time.deltaTime * wristLinearAccelFilterSpeed);
+            _filteredLinearAcceleration = Vector3.Lerp(_filteredLinearAcceleration, linearAcc, t);
+        }
+
+        return _filteredLinearAcceleration;
+    }
+
+    private static Vector3 MapSensorVector(float x, float y, float z, Vector3Int remap, Vector3 sign)
+    {
+        float[] sensor = { x, y, z };
+        return new Vector3(
+            sensor[remap.x] * sign.x,
+            sensor[remap.y] * sign.y,
+            sensor[remap.z] * sign.z);
+    }
+
+    private static Vector3 ApplyComponentDeadzone(Vector3 value, float deadzone)
+    {
+        value.x = Mathf.Abs(value.x) < deadzone ? 0f : value.x;
+        value.y = Mathf.Abs(value.y) < deadzone ? 0f : value.y;
+        value.z = Mathf.Abs(value.z) < deadzone ? 0f : value.z;
+        return value;
     }
 
     private void UpdateKeyboardPositionOffset()
@@ -266,6 +396,9 @@ public class DataGloveHandDriver : MonoBehaviour
             _keyboardOffset = Vector3.zero;
             _currentWristOffset = Vector3.zero;
             _wristVelocity = Vector3.zero;
+            _filteredLinearAcceleration = Vector3.zero;
+            _linearAccelerationFilterPrimed = false;
+            _wristStillTimer = 0f;
         }
 
 #if UNITY_EDITOR
@@ -328,6 +461,9 @@ public class DataGloveHandDriver : MonoBehaviour
         _currentWristOffset = Vector3.zero;
         _wristVelocity = Vector3.zero;
         _keyboardOffset = Vector3.zero;
+        _filteredLinearAcceleration = Vector3.zero;
+        _linearAccelerationFilterPrimed = false;
+        _wristStillTimer = 0f;
         transform.localPosition = _initialWristPosition;
     }
 
@@ -375,10 +511,12 @@ public class DataGloveHandDriver : MonoBehaviour
         {
             if (child.name == name)
                 return child;
+
             Transform found = FindChildRecursive(child, name);
             if (found != null)
                 return found;
         }
+
         return null;
     }
 
@@ -393,6 +531,7 @@ public class DataGloveHandDriver : MonoBehaviour
                 _initialRotations[i] = Array.Empty<Quaternion>();
                 continue;
             }
+
             _initialRotations[i] = new Quaternion[joints.Length];
             for (int j = 0; j < joints.Length; j++)
             {
@@ -428,13 +567,16 @@ public class DataGloveHandDriver : MonoBehaviour
         if (count == 3) return new[] { 0.40f, 0.35f, 0.25f };
 
         float[] w = new float[count];
-        float sum = 0;
+        float sum = 0f;
         for (int i = 0; i < count; i++)
         {
             w[i] = count - i;
             sum += w[i];
         }
-        for (int i = 0; i < count; i++) w[i] /= sum;
+
+        for (int i = 0; i < count; i++)
+            w[i] /= sum;
+
         return w;
     }
 
