@@ -55,7 +55,7 @@ public class DataGloveHandDriver : MonoBehaviour
     [SerializeField] private Vector3Int axisRemap = new Vector3Int(0, 2, 1);
 
     [Header("手腕位置 (WitMotion 传感器)")]
-    [Tooltip("是否启用蓝牙传感器控制手腕位置（基于 AccX/Y/Z 估算相对位移）")]
+    [Tooltip("是否启用蓝牙传感器控制手腕位置（更适合近场、短距离的相对位移增强，不适合远距离自由平移）")]
     public bool enableWristPosition = true;
 
     [Tooltip("位置跟随平滑速度：越小越稳，越大越跟手")]
@@ -70,8 +70,8 @@ public class DataGloveHandDriver : MonoBehaviour
     [Tooltip("线性加速度低通速度（0=关闭）。用于抑制重力估计后的高频抖动")]
     [SerializeField, Range(0f, 30f)] private float wristLinearAccelFilterSpeed = 16f;
 
-    [Tooltip("重力估计低通速度：越小越不容易把真实平移误吸收到重力里")]
-    [SerializeField, Range(0.1f, 10f)] private float gravityEstimateFilterSpeed = 1.4f;
+    [Tooltip("重力估计低通速度：越小越不容易把真实平移误吸收到重力里；近场演示通常可适当调低")]
+    [SerializeField, Range(0.1f, 10f)] private float gravityEstimateFilterSpeed = 1.0f;
 
     [Tooltip("静止时线性残差偏置学习速度，用于慢慢修正加速度零偏")]
     [SerializeField, Range(0f, 10f)] private float accelBiasLearningSpeed = 1.2f;
@@ -91,11 +91,17 @@ public class DataGloveHandDriver : MonoBehaviour
     [Tooltip("冻结期间的额外速度阻尼倍数：越大越能压住假位移")]
     [SerializeField, Range(1f, 10f)] private float freezeVelocityDampingMultiplier = 4f;
 
-    [Tooltip("位置弹簧回中强度：防止偏移完全靠自由积分越飘越远")]
-    [SerializeField, Range(1f, 20f)] private float wristPositionSpring = 6f;
+    [Tooltip("位置弹簧回中强度：防止偏移完全靠自由积分越飘越远；近场演示建议保持较温和回中")]
+    [SerializeField, Range(1f, 20f)] private float wristPositionSpring = 4.5f;
 
-    [Tooltip("位置轴向权重：逐轴削弱最容易被转动污染的轴")]
-    [SerializeField] private Vector3 positionAxisWeight = new Vector3(1f, 0.7f, 0.8f);
+    [Tooltip("位置轴向权重：逐轴削弱最容易被转动污染的轴；近场演示建议优先保留最稳的两个轴")]
+    [SerializeField] private Vector3 positionAxisWeight = new Vector3(1f, 0.8f, 0.55f);
+
+    [Tooltip("仅使用平面相对位移：自动压掉 positionAxisWeight 中最不稳定的那个轴，提升演示稳定性")]
+    [SerializeField] private bool usePlanarPositionOnly = false;
+
+    [Tooltip("持续缓慢回中速度：非冻结、非静止时也让偏移慢慢回到 0，防止长期累计")]
+    [SerializeField, Range(0f, 5f)] private float positionRecenteringSpeed = 0.45f;
 
     [Tooltip("静止线性加速度阈值（g）：与角速度阈值共同用于 zero-velocity update")]
     [SerializeField, Range(0.001f, 0.2f)] private float wristStillAccelerationThreshold = 0.025f;
@@ -106,11 +112,11 @@ public class DataGloveHandDriver : MonoBehaviour
     [Tooltip("静止确认时间（秒）：连续满足静止条件后清零速度")]
     [SerializeField, Range(0f, 1f)] private float wristStillConfirmTime = 0.12f;
 
-    [Tooltip("速度阻尼：越大越快停下来，越不漂")]
-    [SerializeField, Range(0f, 20f)] private float wristVelocityDamping = 2.2f;
+    [Tooltip("速度阻尼：越大越快停下来，越不漂；近场演示可略低一些以保留短距离响应")]
+    [SerializeField, Range(0f, 20f)] private float wristVelocityDamping = 1.8f;
 
-    [Tooltip("最大相对位移（米）")]
-    [SerializeField, Range(0.02f, 0.8f)] private float wristMaxOffset = 0.55f;
+    [Tooltip("最大相对位移（米）：建议保持较小范围，本系统更适合近场交互增强，不适合远距离自由平移")]
+    [SerializeField, Range(0.02f, 0.8f)] private float wristMaxOffset = 0.18f;
 
     [Tooltip("位置坐标系映射：传感器轴 → Unity 轴的符号翻转")]
     [SerializeField] private Vector3 positionAxisSign = new Vector3(-1f, -1f, 1f);
@@ -293,6 +299,7 @@ public class DataGloveHandDriver : MonoBehaviour
         Vector3 linearAcc = rawLinearAcc - accelerationBias;
         linearAcc = FilterLinearAcceleration(linearAcc);
         linearAcc = Vector3.Scale(linearAcc, positionAxisWeight);
+        linearAcc = ApplyPlanarPositionConstraint(linearAcc);
         linearAcc = ApplyComponentDeadzone(linearAcc, wristPositionDeadzone);
 
         bool isStillCandidate =
@@ -333,6 +340,15 @@ public class DataGloveHandDriver : MonoBehaviour
         _wristVelocity -= _currentWristOffset * (wristPositionSpring * dt);
         _wristVelocity = Vector3.Lerp(_wristVelocity, Vector3.zero, dt * wristVelocityDamping);
         _currentWristOffset += _wristVelocity * dt;
+
+        if (positionRecenteringSpeed > 0f)
+        {
+            // 近场演示模式下，即便在运动过程中也让偏移非常缓慢地回中，
+            // 这样不会吃掉短距离操作感，但能避免长期累计后越偏越远。
+            float recenterT = Mathf.Clamp01(dt * positionRecenteringSpeed);
+            _currentWristOffset = Vector3.Lerp(_currentWristOffset, Vector3.zero, recenterT);
+        }
+
         _currentWristOffset = Vector3.ClampMagnitude(_currentWristOffset, wristMaxOffset);
     }
 
@@ -453,6 +469,21 @@ public class DataGloveHandDriver : MonoBehaviour
         }
 
         return _filteredLinearAcceleration;
+    }
+
+    private Vector3 ApplyPlanarPositionConstraint(Vector3 linearAcc)
+    {
+        if (!usePlanarPositionOnly) return linearAcc;
+
+        // 演示模式：自动压掉权重最小的那个轴，保留更稳定的两轴做近场位移增强。
+        if (positionAxisWeight.x <= positionAxisWeight.y && positionAxisWeight.x <= positionAxisWeight.z)
+            linearAcc.x = 0f;
+        else if (positionAxisWeight.y <= positionAxisWeight.x && positionAxisWeight.y <= positionAxisWeight.z)
+            linearAcc.y = 0f;
+        else
+            linearAcc.z = 0f;
+
+        return linearAcc;
     }
 
     private static Vector3 MapSensorVector(float x, float y, float z, Vector3Int remap, Vector3 sign)
