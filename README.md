@@ -11,7 +11,7 @@
 | 能力 | 实现要点 |
 |------|-----------|
 | 手指跟随 | 手套 → 串口 → `SensorBridge.py` → UDP → `GloveDataReceiver` → `DataGloveHandDriver` 旋转 5 指骨骼 |
-| 手腕姿态与位移 | WT9011 BLE → `WitMotionConnector` + `DeviceModel` 解析 → `DataGloveHandDriver` 映射欧拉角与加速度积分位移 |
+| 手腕姿态与位移 | WT9011 BLE → `WitMotionConnector` + `DeviceModel` 解析 → `DataGloveHandDriver` 做欧拉角显示旋转与“重力估计 + 冻结窗口 + 弹簧回中”的相对位移 |
 | 抓取与碰触 | `HandInteractionRig` 在指尖挂 Trigger；`FingerTipRelay` 转发事件；`TouchableObject` 提供高亮与 `UnityEvent`（可接触觉串口等） |
 | 场景与资源 | `RiggedHandPrefabSetup` 一键从 FBX 生成左手 Prefab 并布置场景；`HandSceneSetup` 让主摄像机跟随手部包围盒 |
 | 无手套调试 | `GloveDataReceiver` 的键盘模拟（1–5 单指、Space 握拳）；`SceneViewHandKeyboardBridge` 在 Scene 视图用 WASD 等微调手部位移（运行中） |
@@ -50,7 +50,7 @@ flowchart LR
 **三条主通道简述：**
 
 1. **手套**：蓝牙虚拟串口（上位机或系统枚举为 COMx）→ `SensorBridge.py` 读行、去分号 → UDP `127.0.0.1:5005`（默认）→ `GloveDataReceiver` 解析 11 个逗号分隔数值中的前 5 个为弯曲（0–1800 对应 0°–180°），归一化后交给 `DataGloveHandDriver`。运行前请关闭占用串口的 **OneCOM** 等上位机，否则会与 Python 抢端口。
-2. **姿态传感器**：`WitMotionConnector` 使用 `Assets/Scripts/Bluetooth/BleApi`（WinRT 原生 `BleWinrtDll.dll`）持续轮询扫描，匹配名称含 **WT** 的设备并连接；数据经 `DeviceModel` 线程解析，供 `DataGloveHandDriver` 做手腕旋转与可选的加速度积分位移。项目中另有 `BlueScanner` / `BlueConnector` 通用扫描连接栈，当前 WT 流程以 `WitMotionConnector` 为主（避免短轮询漏设备）。
+2. **姿态传感器**：`WitMotionConnector` 使用 `Assets/Scripts/Bluetooth/BleApi`（WinRT 原生 `BleWinrtDll.dll`）持续轮询扫描，匹配名称含 **WT** 的设备并连接；数据经 `DeviceModel` 线程解析，供 `DataGloveHandDriver` 做手腕旋转与受限相对位移估计。当前位移链路不再追求纯 IMU 自由 3D 积分，而是采用 **慢速低通估计重力 + 启动静止标定 + 转动冻结窗口 + 弹簧回中** 来优先压制“转腕假位移”，更适合演示与交互。项目中另有 `BlueScanner` / `BlueConnector` 通用扫描连接栈，当前 WT 流程以 `WitMotionConnector` 为主（避免短轮询漏设备）。
 3. **触觉**：游戏逻辑层可通过 `TouchableObject` 的事件扩展串口/USB；根目录 Python 脚本用于 **VID `0x674E` / PID `0x000A`** 的 HID 板直连测试（见下文）。
 
 ---
@@ -126,7 +126,7 @@ My project/
 |-------------|------|
 | `SensorBridge.py` | 读手套串口一行 → 去掉末尾 `;` → UDP 发送整行字符串 |
 | `GloveDataReceiver.cs` | UDP 或键盘模拟 → 五指 0–1 弯曲数组；通道顺序可 `reverseFingerOrder` |
-| `DataGloveHandDriver.cs` | 根据弯曲旋转骨骼；根据 `DeviceModel` 数据做手腕旋转/位移及调试键盘叠加 |
+| `DataGloveHandDriver.cs` | 根据弯曲旋转骨骼；根据 `DeviceModel` 数据做手腕旋转、重力估计式相对位移、转动冻结与调试键盘叠加 |
 | `WitMotionConnector.cs` | WT 专用：长时扫描、`connectable=False` 时仍可选连接、连接 `DeviceModel` |
 | `BleApi` + `BlueConnector` + `DeviceModel` | Windows BLE 底层、连接与字节流解析 |
 | `HandInteractionRig.cs` | 指尖 Trigger、捏取/握拳阈值、吸附刚体；需根节点 **Kinematic Rigidbody** |
@@ -165,7 +165,7 @@ My project/
 
 1. 场景中确保有 `WitMotionConnector`（一键 Setup 会添加）。
 2. 打开 WT9011 电源，Windows 蓝牙正常；Play 后等待自动扫描/连接（可在 Inspector 调整 `autoScan`、`autoConnect`、`scanTimeout` 等）。
-3. 若旋转轴反向或漂移，在 `DataGloveHandDriver` 中调节 **axisSign / axisRemap**、死区与平滑参数。
+3. 若旋转轴反向或漂移，在 `DataGloveHandDriver` 中调节 **axisSign / axisRemap**、死区与平滑参数；若位置在平移时偏弱或转腕时仍有假位移，优先调整 **positionAxisWeight**、**wristPositionGain**、**gravityEstimateFilterSpeed**、**positionFreezeDuration** 与 **wristPositionSpring**。
 
 ---
 
@@ -186,6 +186,7 @@ My project/
 
 - **手套无数据**：检查 COM 号、是否被 OneCOM 等占用、波特率 115200、`SensorBridge.py` 与 Unity 端口一致、防火墙是否拦截本机 UDP。
 - **BLE 搜不到 WT**：确认设备名广播含 WT、蓝牙已开、`scanTimeout` 足够；Windows 对 `connectable=False` 时可勾选 `WitMotionConnector` 的 **connectEvenIfNotConnectable**。
+- **WT 位置漂移或转腕假位移明显**：先静止放置传感器约 1–2 秒完成启动标定；再调低 **gravityEstimateFilterSpeed** 防止真实平移被吸进重力估计，调高 **positionFreezeDuration / freezeVelocityDampingMultiplier** 抑制转腕扰动，必要时通过 **positionAxisWeight** 单独减弱最不稳定轴。
 - **抓不住物体**：确认 `TouchableObject` 带 **非 Trigger** 的 Collider + **Rigidbody**；`HandInteractionRig` 根节点有 **Kinematic Rigidbody**；调高 `grabAssistRadius` 或检查 `allowPinchGrab`。
 - **手指穿模**：尝试开启 `HandInteractionRig` 的 **enablePhysicalTipCollision** 并调节物理球半径。
 
@@ -193,5 +194,5 @@ My project/
 
 ## 9. 维护建议
 
-- 修改串口协议、UDP 格式、BLE UUID 或抓取逻辑时，请同步更新 **第 2、5、6、8 节** 与相关脚本顶部注释。
+- 修改串口协议、UDP 格式、BLE UUID、WT 位置估计参数策略或抓取逻辑时，请同步更新 **第 2、5、6、8 节** 与相关脚本顶部注释。
 - 新增场景、Prefab 或第三方插件时，在本 README 增加一行说明其角色，避免后续读者只在工程里“猜”。
