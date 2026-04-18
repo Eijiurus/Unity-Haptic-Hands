@@ -67,11 +67,35 @@ public class DataGloveHandDriver : MonoBehaviour
     [Tooltip("线性加速度死区（g）：抑制重力补偿后的微小噪声")]
     [SerializeField, Range(0f, 0.2f)] private float wristPositionDeadzone = 0.004f;
 
-    [Tooltip("线性加速度低通速度（0=关闭）。用于抑制重力补偿后的高频抖动")]
+    [Tooltip("线性加速度低通速度（0=关闭）。用于抑制重力估计后的高频抖动")]
     [SerializeField, Range(0f, 30f)] private float wristLinearAccelFilterSpeed = 16f;
+
+    [Tooltip("重力估计低通速度：越小越不容易把真实平移误吸收到重力里")]
+    [SerializeField, Range(0.1f, 10f)] private float gravityEstimateFilterSpeed = 1.4f;
+
+    [Tooltip("静止时线性残差偏置学习速度，用于慢慢修正加速度零偏")]
+    [SerializeField, Range(0f, 10f)] private float accelBiasLearningSpeed = 1.2f;
+
+    [Tooltip("是否启用启动静止标定与后续偏置学习")]
+    [SerializeField] private bool useGravityEstimateCalibration = true;
+
+    [Tooltip("启动静止标定时长（秒）：建议放在 1~2 秒之间")]
+    [SerializeField, Range(0.2f, 3f)] private float startupCalibrationDuration = 1.2f;
 
     [Tooltip("角速度门控阈值（°/s）：转腕过快时暂停位置积分，避免假位移")]
     [SerializeField, Range(10f, 1080f)] private float wristAngularVelocityGate = 120f;
+
+    [Tooltip("转动冻结窗口时长（秒）：角速度过大后继续冻结一小段时间")]
+    [SerializeField, Range(0.12f, 0.3f)] private float positionFreezeDuration = 0.18f;
+
+    [Tooltip("冻结期间的额外速度阻尼倍数：越大越能压住假位移")]
+    [SerializeField, Range(1f, 10f)] private float freezeVelocityDampingMultiplier = 4f;
+
+    [Tooltip("位置弹簧回中强度：防止偏移完全靠自由积分越飘越远")]
+    [SerializeField, Range(1f, 20f)] private float wristPositionSpring = 6f;
+
+    [Tooltip("位置轴向权重：逐轴削弱最容易被转动污染的轴")]
+    [SerializeField] private Vector3 positionAxisWeight = new Vector3(1f, 0.7f, 0.8f);
 
     [Tooltip("静止线性加速度阈值（g）：与角速度阈值共同用于 zero-velocity update")]
     [SerializeField, Range(0.001f, 0.2f)] private float wristStillAccelerationThreshold = 0.025f;
@@ -110,18 +134,26 @@ public class DataGloveHandDriver : MonoBehaviour
     private Quaternion _initialWristRotation;
     private Quaternion _currentWristRotation;
     private Quaternion _displayTargetWristRotation = Quaternion.identity;
-    private Quaternion _compensationWristRotation = Quaternion.identity;
     private Vector3 _filteredDisplayEuler;
-    private Vector3 _filteredCompensationEuler;
     private bool _wristEulerFilterPrimed;
     private int _lastWristSensorFrame = -1;
 
     private Vector3 _initialWristPosition;
     private Vector3 _currentWristOffset;
     private Vector3 _wristVelocity;
+    private Vector3 _gravityEstimate;
+    private bool _gravityEstimatePrimed;
     private Vector3 _filteredLinearAcceleration;
     private bool _linearAccelerationFilterPrimed;
     private float _wristStillTimer;
+    private float _positionFreezeTimer;
+
+    private Vector3 accelerationBias;
+    private bool isStartupCalibrating;
+    private float startupCalibrationTimer;
+    private Vector3 startupGravityAccumulator;
+    private Vector3 startupBiasAccumulator;
+    private int startupSampleCount;
 
     private Vector3 _keyboardOffset;
     private Vector3 _editorInjectedInput;
@@ -141,18 +173,25 @@ public class DataGloveHandDriver : MonoBehaviour
         _initialWristRotation = transform.localRotation;
         _currentWristRotation = Quaternion.identity;
         _displayTargetWristRotation = Quaternion.identity;
-        _compensationWristRotation = Quaternion.identity;
         _filteredDisplayEuler = Vector3.zero;
-        _filteredCompensationEuler = Vector3.zero;
         _wristEulerFilterPrimed = false;
         _lastWristSensorFrame = -1;
 
         _initialWristPosition = transform.localPosition;
         _currentWristOffset = Vector3.zero;
         _wristVelocity = Vector3.zero;
+        _gravityEstimate = Vector3.zero;
+        _gravityEstimatePrimed = false;
         _filteredLinearAcceleration = Vector3.zero;
         _linearAccelerationFilterPrimed = false;
         _wristStillTimer = 0f;
+        _positionFreezeTimer = 0f;
+        accelerationBias = Vector3.zero;
+        isStartupCalibrating = true;
+        startupCalibrationTimer = 0f;
+        startupGravityAccumulator = Vector3.zero;
+        startupBiasAccumulator = Vector3.zero;
+        startupSampleCount = 0;
         _keyboardOffset = Vector3.zero;
     }
 
@@ -208,7 +247,8 @@ public class DataGloveHandDriver : MonoBehaviour
 
     /// <summary>
     /// 使用 WitMotion 的加速度数据估算手腕相对位移。
-    /// 注意：IMU 无绝对位置，长时间会漂移；这里通过重力补偿、转腕门控和静止清速尽量抑制漂移。
+    /// 这里不再依赖欧拉角旋转后的重力补偿，而是使用慢速低通估计重力，
+    /// 再叠加启动标定、转动冻结窗口和弹簧回中来抑制假位移。
     /// </summary>
     private void ApplyWristPosition(DeviceModel wtDevice)
     {
@@ -224,17 +264,36 @@ public class DataGloveHandDriver : MonoBehaviour
 
         Vector3 mappedSensorAcc = MapSensorVector(accX, accY, accZ, positionAxisRemap, positionAxisSign);
         Vector3 mappedAngularVelocity = MapSensorVector(asX, asY, asZ, axisRemap, axisSign);
-
-        // 关键改动：先把传感器加速度旋到 Unity 参考系，再扣掉 1g 重力，
-        // 避免仅仅转动 IMU 时把重力投影误当作线位移。
-        Vector3 worldAccWithGravity = _compensationWristRotation * mappedSensorAcc;
-        Vector3 linearAcc = worldAccWithGravity - Vector3.up;
-
-        linearAcc = FilterLinearAcceleration(linearAcc);
-        linearAcc = ApplyComponentDeadzone(linearAcc, wristPositionDeadzone);
-
         float angularSpeed = mappedAngularVelocity.magnitude;
         float dt = Time.deltaTime;
+
+        UpdateStartupCalibration(mappedSensorAcc, angularSpeed, dt);
+
+        if (angularSpeed >= wristAngularVelocityGate)
+            _positionFreezeTimer = positionFreezeDuration;
+
+        if (_positionFreezeTimer > 0f)
+            _positionFreezeTimer = Mathf.Max(0f, _positionFreezeTimer - dt);
+
+        bool isPositionFrozen = isStartupCalibrating || _positionFreezeTimer > 0f;
+
+        // 关键改动：位置链路改成“慢速低通估计重力”。
+        // 相比直接依赖 Quaternion.Euler(...) 扣重力，这种方式对欧拉角误差和姿态漂移更不敏感，
+        // 更适合当前“只求稳定相对偏移，不追求纯 IMU 自由积分”的目标。
+        UpdateGravityEstimate(mappedSensorAcc, isPositionFrozen, dt);
+
+        Vector3 rawLinearAcc = mappedSensorAcc - _gravityEstimate;
+
+        if (!isStartupCalibrating && useGravityEstimateCalibration && angularSpeed <= wristStillAngularSpeedThreshold)
+        {
+            float biasLerp = Mathf.Clamp01(dt * accelBiasLearningSpeed);
+            accelerationBias = Vector3.Lerp(accelerationBias, rawLinearAcc, biasLerp);
+        }
+
+        Vector3 linearAcc = rawLinearAcc - accelerationBias;
+        linearAcc = FilterLinearAcceleration(linearAcc);
+        linearAcc = Vector3.Scale(linearAcc, positionAxisWeight);
+        linearAcc = ApplyComponentDeadzone(linearAcc, wristPositionDeadzone);
 
         bool isStillCandidate =
             linearAcc.magnitude <= wristStillAccelerationThreshold &&
@@ -245,19 +304,33 @@ public class DataGloveHandDriver : MonoBehaviour
 
         if (isStill)
         {
-            // 关键改动：静止检测通过后执行 zero-velocity update，强制清零残余速度。
+            // 静止时执行 zero-velocity update，并轻微拉回偏移中心，
+            // 让手在无输入时更稳定地停住，而不是保留残余漂移。
             _wristVelocity = Vector3.zero;
+            _currentWristOffset = Vector3.Lerp(
+                _currentWristOffset,
+                Vector3.zero,
+                Mathf.Clamp01(dt * Mathf.Max(1f, wristPositionSpring * 0.35f)));
+
+            // 静止时允许更快重建重力基线，帮助恢复转动后的稳定状态。
+            UpdateGravityEstimate(mappedSensorAcc, true, dt);
             return;
         }
 
-        if (angularSpeed >= wristAngularVelocityGate)
+        if (isPositionFrozen)
         {
-            // 关键改动：转腕过快时暂停位置积分，仅保留阻尼，抑制“转一下就平移”的假位移。
-            _wristVelocity = Vector3.Lerp(_wristVelocity, Vector3.zero, dt * (wristVelocityDamping + 6f));
+            // 关键改动：加入“转动冻结窗口”。
+            // 只要刚发生明显转腕，就短暂停止位置积分，并加强速度阻尼，
+            // 用时间窗口切断“角速度扰动 -> 假平移”的链路。
+            float freezeDamping = wristVelocityDamping * Mathf.Max(1f, freezeVelocityDampingMultiplier);
+            _wristVelocity = Vector3.Lerp(_wristVelocity, Vector3.zero, dt * freezeDamping);
             return;
         }
 
         _wristVelocity += linearAcc * (wristPositionGain * dt);
+        // 关键改动：加入弹簧回中，让偏移更像“有限范围的相对位移”，
+        // 而不是自由积分后越来越远。
+        _wristVelocity -= _currentWristOffset * (wristPositionSpring * dt);
         _wristVelocity = Vector3.Lerp(_wristVelocity, Vector3.zero, dt * wristVelocityDamping);
         _currentWristOffset += _wristVelocity * dt;
         _currentWristOffset = Vector3.ClampMagnitude(_currentWristOffset, wristMaxOffset);
@@ -282,12 +355,6 @@ public class DataGloveHandDriver : MonoBehaviour
 
         Vector3 mappedRawEuler = MapSensorVector(angX, angY, angZ, axisRemap, axisSign);
 
-        // 重力补偿使用“真实姿态”，不能乘 wristAngleScale，否则会残留大块重力分量。
-        Vector3 compensationEuler = new Vector3(
-            mappedRawEuler.x,
-            mappedRawEuler.y,
-            mappedRawEuler.z * yawScale);
-
         // 关键改动：先对原始角度做死区，再乘显示灵敏度。
         Vector3 displayRawEuler = ApplyComponentDeadzone(mappedRawEuler, wristRotationDeadzone);
         Vector3 displayEuler = new Vector3(
@@ -299,27 +366,70 @@ public class DataGloveHandDriver : MonoBehaviour
         {
             if (!_wristEulerFilterPrimed)
             {
-                _filteredCompensationEuler = compensationEuler;
                 _filteredDisplayEuler = displayEuler;
                 _wristEulerFilterPrimed = true;
             }
             else
             {
                 float t = Mathf.Clamp01(Time.deltaTime * wristEulerFilterSpeed);
-                _filteredCompensationEuler = Vector3.Lerp(_filteredCompensationEuler, compensationEuler, t);
                 _filteredDisplayEuler = Vector3.Lerp(_filteredDisplayEuler, displayEuler, t);
             }
         }
         else
         {
-            _filteredCompensationEuler = compensationEuler;
             _filteredDisplayEuler = displayEuler;
             _wristEulerFilterPrimed = true;
         }
 
-        _compensationWristRotation = Quaternion.Euler(_filteredCompensationEuler);
         _displayTargetWristRotation = Quaternion.Euler(_filteredDisplayEuler);
         _lastWristSensorFrame = Time.frameCount;
+    }
+
+    private void UpdateStartupCalibration(Vector3 mappedSensorAcc, float angularSpeed, float dt)
+    {
+        if (!isStartupCalibrating) return;
+
+        if (angularSpeed > wristStillAngularSpeedThreshold)
+            return;
+
+        startupCalibrationTimer += dt;
+        startupSampleCount++;
+        startupGravityAccumulator += mappedSensorAcc;
+
+        Vector3 avgGravity = startupGravityAccumulator / Mathf.Max(1, startupSampleCount);
+        _gravityEstimate = avgGravity;
+        _gravityEstimatePrimed = true;
+
+        if (useGravityEstimateCalibration)
+        {
+            Vector3 residual = mappedSensorAcc - avgGravity;
+            startupBiasAccumulator += residual;
+            accelerationBias = startupBiasAccumulator / Mathf.Max(1, startupSampleCount);
+        }
+
+        if (startupCalibrationTimer >= startupCalibrationDuration)
+        {
+            isStartupCalibrating = false;
+            _wristVelocity = Vector3.zero;
+            _positionFreezeTimer = 0f;
+        }
+    }
+
+    private void UpdateGravityEstimate(Vector3 mappedSensorAcc, bool preferFastAdapt, float dt)
+    {
+        if (!_gravityEstimatePrimed)
+        {
+            _gravityEstimate = mappedSensorAcc;
+            _gravityEstimatePrimed = true;
+            return;
+        }
+
+        float filterSpeed = gravityEstimateFilterSpeed;
+        if (preferFastAdapt)
+            filterSpeed = Mathf.Max(filterSpeed, gravityEstimateFilterSpeed * 3f);
+
+        float t = Mathf.Clamp01(dt * filterSpeed);
+        _gravityEstimate = Vector3.Lerp(_gravityEstimate, mappedSensorAcc, t);
     }
 
     private Vector3 FilterLinearAcceleration(Vector3 linearAcc)
@@ -399,6 +509,7 @@ public class DataGloveHandDriver : MonoBehaviour
             _filteredLinearAcceleration = Vector3.zero;
             _linearAccelerationFilterPrimed = false;
             _wristStillTimer = 0f;
+            _positionFreezeTimer = 0f;
         }
 
 #if UNITY_EDITOR
@@ -464,6 +575,7 @@ public class DataGloveHandDriver : MonoBehaviour
         _filteredLinearAcceleration = Vector3.zero;
         _linearAccelerationFilterPrimed = false;
         _wristStillTimer = 0f;
+        _positionFreezeTimer = 0f;
         transform.localPosition = _initialWristPosition;
     }
 
