@@ -1,0 +1,64 @@
+# Unity 產生目錄（體積大、變動頻繁，對閱讀 C# 邏輯無幫助）
+Library/
+Temp/
+Obj/
+Build/
+Builds/
+Logs/
+UserSettings/
+MemoryCaptures/
+Recordings/
+ExportedObj/
+
+# 崩潰報告與雜項
+sysinfo.txt
+crashlytics-build.properties
+
+# IDE / MSBuild 產物
+.vs/
+.vscode/
+*.csproj
+*.sln
+*.suo
+*.user
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# 大型二進位與媒體（模型、音訊、影片、打包）
+*.fbx
+*.FBX
+*.blend
+*.wav
+*.mp3
+*.mp4
+*.ogg
+*.exr
+*.tif
+*.tiff
+*.tga
+*.psd
+*.cubemap
+*.hdr
+*.unitypackage
+*.apk
+*.aab
+*.exe
+*.app
+
+# 原生外掛（例如 BleWinrtDll.dll）
+*.dll
+*.so
+*.dylib
+*.bundle
+
+# 每個資源對應的 .meta（數量多，對理解程式架構幫助有限，可減輕索引負擔）
+*.meta
+
+# OS
+.DS_Store
+Thumbs.db

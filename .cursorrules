@@ -1,3 +1,27 @@
-这是一个 Unity 2022 项目，使用 C# 开发。
-硬件包括 Elastreme Sense Manu-5D 手套（通过上位机传数据）、Arduino（串口通信）、DRV2605 触觉芯片。
-主要功能是虚拟手抓取和触觉反馈。使用 XR Interaction Toolkit。
+# 项目概要（供 Cursor / Agent 遵循）
+
+- **引擎与语言**：Unity **2022.3 LTS**（见 `ProjectSettings/ProjectVersion.txt`），主逻辑为 **C#**；手套串口桥与触觉冒烟测试为 **Python 3**（`pyserial`、`hid`）。
+- **题目方向**：基于数据手套的虚拟手交互与触觉反馈（毕设向原型）。
+
+## 硬件与数据流（与代码假设一致）
+
+- **手套**：Elastreme Sense **Manu-5D**（ASCII 行、分号结尾、默认 **115200**）。进入 Unity 的路径为：**虚拟串口 → `Assets/Scripts/SensorBridge.py` 读行去分号 → UDP**（本机端口与 `GloveDataReceiver` 一致），不要假设 Unity 直接读手套串口。
+- **手腕姿态**：WitMotion **WT9011DCL-BT50**（BLE，广播名常含 **WT**）→ `WitMotionConnector` + `DeviceModel` / `BleApi`，供 `DataGloveHandDriver` 手腕旋转与可选加速度积分位移。
+- **触觉**：游戏内可经 `TouchableObject` 的 **UnityEvent** 扩展串口/USB；仓库根目录 **`test_hid.py` / `test_vibrate.py`** 用于 **VID `0x674E` / PID `0x000A`** 的 HID 板验证。**Arduino + DRV2605** 为可选方案，协议以实机为准。
+
+## 场景交互（重要）
+
+- **`Packages/manifest.json` 未引入 XR Interaction Toolkit**。交互为 **非 XR**：指尖 **Trigger**、根节点 **Kinematic Rigidbody**、`HandInteractionRig` / `FingerTipRelay` / `TouchableObject`，修改代码时不要默认使用 XRI API 或 XR 相机装配。
+
+## 核心脚本与目录
+
+- 接收与驱动：`GloveDataReceiver.cs`、`DataGloveHandDriver.cs`
+- BLE：`WitMotionConnector.cs`、`Bluetooth/BleApi`、`BlueConnector`、`BlueScanner`；解析：`Device/DeviceModel.cs`、`DevicesManager.cs`
+- 交互：`HandInteractionRig.cs`、`TouchableObject.cs`、`FingerTipRelay.cs`、`HandSceneSetup.cs`
+- 编辑器：`Assets/Editor/RiggedHandPrefabSetup.cs`（Tools → Setup Rigged Hand Prefab）、`SceneViewHandKeyboardBridge.cs`
+- **架构、端口、排障**：以根目录 **`README.md`** 为准；变更数据格式或抓取逻辑时应同步更新 README 相关章节。
+
+## 实现原则
+
+- 与现有命名、Inspector 字段风格一致；避免无关重构与未请求的长说明注释。
+- 修改协议（串口/UDP/BLE UUID/抓取）时，核对 **Python 桥、`GloveDataReceiver`、驱动与交互** 是否一致。

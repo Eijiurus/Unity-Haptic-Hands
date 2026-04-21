@@ -202,10 +202,14 @@ public class HandInteractionRig : MonoBehaviour
                 pick = FindTouchableNearIndexTip();
             if (pick != null)
             {
-                _held = pick;
                 _touching.Remove(pick);
-                pick.Grab(GetGrabAttachPoint());
-                Log($"[Grab] 抓取成功: {pick.name} | attach={GetGrabAttachPoint().name}");
+                if (pick.Grab(GetGrabAttachPoint()))
+                {
+                    _held = pick;
+                    Log($"[Grab] 抓取成功: {pick.name} | attach={GetGrabAttachPoint().name}");
+                }
+                else
+                    _touching.Add(pick);
             }
         }
         else if (!pinch && _pinchWasDown && _held != null)
@@ -274,12 +278,16 @@ public class HandInteractionRig : MonoBehaviour
         touchable.NotifyFingerTouchEnter();
 
         // If fingers are already pinching when contact happens, grab immediately.
-        if (_pinchIsDown)
+        if (_pinchIsDown && touchable.AllowPinchGrab)
         {
-            _held = touchable;
             _touching.Remove(touchable);
-            touchable.Grab(GetGrabAttachPoint());
-            Log($"[Grab] 触碰即抓取: {touchable.name} | attach={GetGrabAttachPoint().name}");
+            if (touchable.Grab(GetGrabAttachPoint()))
+            {
+                _held = touchable;
+                Log($"[Grab] 触碰即抓取: {touchable.name} | attach={GetGrabAttachPoint().name}");
+            }
+            else
+                _touching.Add(touchable);
         }
     }
 

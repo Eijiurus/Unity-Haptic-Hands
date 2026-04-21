@@ -66,19 +66,22 @@ public class TouchableObject : MonoBehaviour
         }
     }
 
-    public void Grab(Transform attachPoint)
+    /// <returns>是否实际进入抓取状态（不可捏取的物体返回 false）</returns>
+    public bool Grab(Transform attachPoint)
     {
-        if (!allowPinchGrab) return;
+        if (!allowPinchGrab) return false;
         _grabbed = true;
         _touchRefCount = 0;
         _rb.isKinematic = true;
         transform.SetParent(attachPoint, true);
         ApplyColor(grabbedColor);
         onGrabbed?.Invoke();
+        return true;
     }
 
     public void Release()
     {
+        if (!_grabbed) return;
         _grabbed = false;
         transform.SetParent(null, true);
         _rb.isKinematic = false;
