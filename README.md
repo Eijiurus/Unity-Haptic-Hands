@@ -14,6 +14,7 @@
 | 手腕姿态与位移 | WT9011 BLE → `WitMotionConnector` + `DeviceModel` 解析 → `DataGloveHandDriver` 做欧拉角显示旋转与**近场、短距离**的相对位移增强（重力低通估计 + 启动标定 + 冻结窗口 + 弹簧回中；可选平面模式与缓慢回中） |
 | 抓取与碰触 | `HandInteractionRig` 在指尖挂 Trigger；`FingerTipRelay` 转发事件；`TouchableObject` 提供高亮与 `UnityEvent`（可接触觉串口等） |
 | 场景与资源 | `RiggedHandPrefabSetup` 一键从 FBX 生成左手 Prefab 并布置场景；`HandSceneSetup` 让主摄像机跟随手部包围盒 |
+| 控制台物理 UI | `ControlPanelSetup` 生成 **ControlPanel**（桌、双按钮、`PressableButton` / `ButtonTriggerZone`、`LampController`、旋钮占位）；指尖 **`FingerTip`** + 触发体即可按压，**无需**在按钮上挂 `GloveDataReceiver` |
 | 无手套调试 | `GloveDataReceiver` 的键盘模拟（1–5 单指、Space 握拳）；`SceneViewHandKeyboardBridge` 在 Scene 视图用 WASD 等微调手部位移（运行中） |
 
 本项目 **未** 在 `Packages/manifest.json` 中引入 **XR Interaction Toolkit**；交互基于自定义 Trigger / 捏合阈值与物理刚体。
@@ -86,9 +87,11 @@ My project/
 ├── Assets/
 │   ├── Editor/
 │   │   ├── RiggedHandPrefabSetup.cs   # 菜单 Tools → Setup Rigged Hand Prefab
+│   │   ├── ControlPanelSetup.cs       # 菜单 Tools → Setup Control Panel（控制台层级与按钮→灯绑定）
 │   │   └── SceneViewHandKeyboardBridge.cs  # 运行时在 Scene 视图用键盘微调手部位置
 │   ├── Materials/
-│   │   └── HandSkin.mat
+│   │   ├── HandSkin.mat
+│   │   └── ControlPanel/              # 控制台灰/红/蓝/灯泡材质（由 Setup 生成或使用）
 │   ├── Models/
 │   │   └── Rigged Hand.fbx
 │   ├── Prefabs/Hands/
@@ -103,6 +106,9 @@ My project/
 │       ├── HandInteractionRig.cs
 │       ├── TouchableObject.cs
 │       ├── FingerTipRelay.cs      # 指尖 Trigger → HandInteractionRig
+│       ├── PressableButton.cs     # 物理按压按钮（指尖 Trigger → ButtonTriggerZone）
+│       ├── ButtonTriggerZone.cs   # 转发 FingerTip 进入/离开给 PressableButton
+│       ├── LampController.cs      # 灯泡开关与亮度（可与按钮 UnityEvent 绑定）
 │       ├── HandSceneSetup.cs      # 主摄像机对准手部
 │       ├── Bluetooth/
 │       │   ├── BlueConnector.cs   # GATT 连接与收包线程

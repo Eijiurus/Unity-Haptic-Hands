@@ -121,6 +121,9 @@ public class HandInteractionRig : MonoBehaviour
             tipGo.transform.localPosition = tipLocalOffset;
             tipGo.transform.localRotation = Quaternion.identity;
 
+            // 让外部触发体（按钮 TriggerZone 等）能通过 CompareTag("FingerTip") 识别指尖
+            TrySetFingerTipTag(tipGo);
+
             var col = tipGo.AddComponent<SphereCollider>();
             col.isTrigger = true;
             col.radius = tipRadius;
@@ -143,6 +146,36 @@ public class HandInteractionRig : MonoBehaviour
 
         if (_indexTip == null)
             _indexTip = transform;
+    }
+
+    /// <summary>
+    /// 给指尖球打上 "FingerTip" 标签；若工程未注册该标签则静默跳过。
+    /// 运行 Tools/Setup Control Panel 后会自动注册。
+    /// </summary>
+    static bool s_fingerTipTagChecked;
+    static bool s_fingerTipTagAvailable;
+    static void TrySetFingerTipTag(GameObject go)
+    {
+        if (!s_fingerTipTagChecked)
+        {
+            s_fingerTipTagChecked = true;
+            try
+            {
+                go.tag = "FingerTip";
+                s_fingerTipTagAvailable = true;
+                return;
+            }
+            catch (UnityException)
+            {
+                s_fingerTipTagAvailable = false;
+                Debug.LogWarning("[HandInteractionRig] 未注册 Tag 'FingerTip'，指尖将不带标签。" +
+                                 "运行 Tools/Setup Control Panel 可自动添加。");
+                return;
+            }
+        }
+
+        if (s_fingerTipTagAvailable)
+            go.tag = "FingerTip";
     }
 
     void Update()
