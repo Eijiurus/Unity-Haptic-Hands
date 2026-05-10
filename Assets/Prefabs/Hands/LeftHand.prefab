@@ -1197,12 +1197,42 @@ MonoBehaviour:
     maxBendAngle: 90
   boneSuffix: .L
   smoothSpeed: 12
+  lockWristRotation: 0
   enableWristRotation: 1
-  wristSmoothSpeed: 6
-  wristAngleScale: 0.55
-  wristEulerFilterSpeed: 8
+  wristSmoothSpeed: 3
+  wristAngleScale: 0.1
+  yawScale: 0.45
+  wristEulerFilterSpeed: 18
+  wristRotationDeadzone: 12
   axisSign: {x: -1, y: -1, z: 1}
   axisRemap: {x: 0, y: 2, z: 1}
+  enableWristPosition: 1
+  wristPositionSmoothSpeed: 22
+  wristPositionGain: 2.2
+  wristPositionDeadzone: 0.004
+  wristLinearAccelFilterSpeed: 16
+  gravityEstimateFilterSpeed: 1
+  accelBiasLearningSpeed: 1.2
+  useGravityEstimateCalibration: 1
+  startupCalibrationDuration: 1.2
+  wristAngularVelocityGate: 120
+  positionFreezeDuration: 0.18
+  freezeVelocityDampingMultiplier: 4
+  wristPositionSpring: 4.5
+  positionAxisWeight: {x: 1, y: 0.8, z: 0.55}
+  usePlanarPositionOnly: 0
+  positionRecenteringSpeed: 0.45
+  wristStillAccelerationThreshold: 0.025
+  wristStillAngularSpeedThreshold: 6
+  wristStillConfirmTime: 0.12
+  wristVelocityDamping: 1.8
+  wristMaxOffset: 0.18
+  positionAxisSign: {x: -1, y: -1, z: 1}
+  positionAxisRemap: {x: 0, y: 2, z: 1}
+  enableKeyboardPositionControl: 1
+  keyboardMoveSpeed: 0.9
+  keyboardMaxOffset: 1.5
+  limitKeyboardOffset: 0
 --- !u!114 &9182736459102837465
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1218,9 +1248,21 @@ MonoBehaviour:
   gloveData: {fileID: 0}
   boneSuffix: .L
   tipRadius: 0.018
+  enablePhysicalTipCollision: 1
+  physicalTipRadius: 0.013
   tipLocalOffset: {x: 0, y: 0, z: 0.012}
   pinchThreshold: 0.5
+  releaseThreshold: 0.35
+  useTipDistancePinch: 1
+  pinchDistance: 0.028
+  releaseDistance: 0.04
+  fistGripThreshold: 0.55
+  grabAssistRadius: 0.06
   pinchKey: 103
+  bentGrabThreshold: 0.25
+  attachToPalm: 1
+  showGrabDebugLog: 1
+  bentGrabLowThreshold: 0.12
 --- !u!1 &3871187150524126004
 GameObject:
   m_ObjectHideFlags: 0

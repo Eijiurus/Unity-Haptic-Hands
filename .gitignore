@@ -35,6 +35,11 @@ crashlytics-build.properties
 .DS_Store
 Thumbs.db
 
+# Python (SensorBridge.py / HapticBridge.py 等本地脚本)
+__pycache__/
+*.py[cod]
+*.pyo
+
 # Gradle (Android builds)
 ExportedObj/
 *.apk

@@ -33,40 +33,49 @@ public static class ControlPanelSetup
         DestroyAllByName("ControlPanel");
 
         GameObject panel = new GameObject("ControlPanel");
-        panel.transform.position = new Vector3(0f, 0f, 0.3f);
+        // 整体抬到桌面工作高度：panel y=0.72 → Table top 落在世界 y≈0.74（标准桌面高度），
+        // 用户的虚拟手在常规 VR/桌面相机视角下伸手就能够到。
+        // 如果你的相机/IMU 校准是按 floor 高度配的、抬高后看不到面板，可以
+        //   (a) 直接改这里的 0.72 为更小的数；或
+        //   (b) 运行后在 Inspector 选中 ControlPanel 改 Position.Y。
+        panel.transform.position = new Vector3(0f, 0.72f, 0.3f);
 
-        // 1) 桌面
+        // 1) 桌面：proper desk-sized slab。0.7m 宽 × 4cm 厚 × 0.45m 深，
+        //    替代原来 50×2×30cm 的薄板。所有控件都坐在它上面。
         GameObject table = CreatePrimitive(PrimitiveType.Cube, "Table", panel.transform,
             localPos: Vector3.zero,
-            localScale: new Vector3(0.5f, 0.02f, 0.3f),
+            localScale: new Vector3(0.7f, 0.04f, 0.45f),
             material: grayMat);
 
-        // 桌面顶面 y = 0.01；后续控件中心放在 y = 0.02 即可贴在桌上
-        const float surfaceY = 0.02f;
+        // 桌面顶面 local y = 0.02（Table 中心 y=0，scale.y=0.04 → 半高 0.02）。
+        // 下面两个常量分别给"扁形控件（按钮）"和"立式控件（旋钮）"用作中心高度——
+        // 已经把它们各自的半高加进去了，所以控件底面正好贴桌面。
+        const float buttonCenterY = 0.035f; // 桌面 0.02 + 按钮 cube 半高 0.015
+        const float knobCenterY   = 0.045f; // 桌面 0.02 + 旋钮 cylinder 半高 0.025
 
-        // 2) 按钮 01（红） — 桌面左侧
+        // 2) 按钮 01（红） — 桌面左前
         BuildButton(panel.transform, "Button_01",
-            localPos: new Vector3(-0.1f, surfaceY, 0f),
+            localPos: new Vector3(-0.15f, buttonCenterY, 0.05f),
             visualMat: redMat,
             pressableIdleColor: GetMaterialBaseColor(redMat));
 
-        // 3) 按钮 02（蓝） — 桌面右侧
+        // 3) 按钮 02（蓝） — 桌面右前
         BuildButton(panel.transform, "Button_02",
-            localPos: new Vector3(0.1f, surfaceY, 0f),
+            localPos: new Vector3(0.15f, buttonCenterY, 0.05f),
             visualMat: blueMat,
             pressableIdleColor: GetMaterialBaseColor(blueMat));
 
         // 4) 旋钮 — 桌面中间靠后
         BuildKnob(panel.transform, "Knob_01",
-            localPos: new Vector3(0f, surfaceY, -0.08f),
+            localPos: new Vector3(0f, knobCenterY, -0.12f),
             visualMat: grayMat);
 
-        // 5) 两盏灯 — 桌面后方稍高的位置
+        // 5) 两盏灯 — 桌面后方左右两端、稍高的位置
         BuildLamp(panel.transform, "Lamp_01",
-            localPos: new Vector3(-0.15f, 0.08f, -0.12f),
+            localPos: new Vector3(-0.25f, 0.14f, -0.18f),
             bulbMat: lampMat);
         BuildLamp(panel.transform, "Lamp_02",
-            localPos: new Vector3(0.15f, 0.08f, -0.12f),
+            localPos: new Vector3(0.25f, 0.14f, -0.18f),
             bulbMat: lampMat);
 
         WirePressableToggleToLamp(
@@ -82,16 +91,17 @@ public static class ControlPanelSetup
 
         Debug.Log("[ControlPanelSetup] ControlPanel 搭建完成。");
         EditorUtility.DisplayDialog("完成",
-            "ControlPanel 已生成在 (0, 0, 0.3)。\n\n" +
+            "ControlPanel 已生成在 (0, 0.72, 0.3)，桌面顶面在世界 y≈0.74。\n\n" +
             "包含：\n" +
-            "  · Table（灰）\n" +
+            "  · Table（灰，0.7m × 4cm × 0.45m 的桌板）\n" +
             "  · Button_01（红） + TriggerZone\n" +
             "  · Button_02（蓝） + TriggerZone\n" +
-            "  · Knob_01（旋钮） + GrabZone\n" +
+            "  · Knob_01（旋钮，Visual 已自动挂默认配置的 RotaryKnob） + GrabZone\n" +
             "  · Lamp_01 / Lamp_02（LampController + Point Light）\n" +
             "  · Button_01.onPressed → Lamp_01.Toggle\n" +
             "  · Button_02.onPressed → Lamp_02.Toggle\n\n" +
-            "FingerTip Tag 已确保存在；HandInteractionRig 运行时会给指尖球自动打这个 Tag。",
+            "FingerTip Tag 已确保存在；HandInteractionRig 运行时会给指尖球自动打这个 Tag。\n\n" +
+            "下一步：跑 Tools/Setup Knob Interaction 把 GrabZone 的抓取链路接上。",
             "好的");
     }
 
@@ -106,7 +116,7 @@ public static class ControlPanelSetup
 
         GameObject visual = CreatePrimitive(PrimitiveType.Cube, "Visual", btn.transform,
             localPos: Vector3.zero,
-            localScale: new Vector3(0.04f, 0.02f, 0.04f),
+            localScale: new Vector3(0.055f, 0.03f, 0.055f),
             material: visualMat);
 
         Renderer visualRend = visual.GetComponent<Renderer>();
@@ -117,7 +127,7 @@ public static class ControlPanelSetup
 
         GameObject trigger = CreatePrimitive(PrimitiveType.Cube, "TriggerZone", btn.transform,
             localPos: Vector3.zero,
-            localScale: new Vector3(0.06f, 0.06f, 0.06f),
+            localScale: new Vector3(0.09f, 0.09f, 0.09f),
             material: null);
 
         // 关掉 MeshRenderer，让触发体只用于碰撞检测
@@ -147,15 +157,24 @@ public static class ControlPanelSetup
         knob.transform.SetParent(parent, false);
         knob.transform.localPosition = localPos;
 
-        // Cylinder 默认高度为 2，scale.y = 0.02 → 实际高度 0.04（≈ 4cm 厚的旋钮顶面）
-        CreatePrimitive(PrimitiveType.Cylinder, "Visual", knob.transform,
+        // Cylinder 默认高度为 2，scale.y = 0.025 → 实际高度 0.05（5cm 厚的旋钮顶面）
+        GameObject knobVisual = CreatePrimitive(PrimitiveType.Cylinder, "Visual", knob.transform,
             localPos: Vector3.zero,
-            localScale: new Vector3(0.06f, 0.02f, 0.06f),
+            localScale: new Vector3(0.08f, 0.025f, 0.08f),
             material: visualMat);
+
+        // v7：自动挂 RotaryKnob，省掉用户每次重建后都要手动 AddComponent 的步骤。
+        // 字段默认值（minAngle=0, maxAngle=270, angleStep=15, displacementAxis=X,
+        // degreesPerMeter=3000, signFlip=1, knobRotationAxis=Y, useRawWristPosition=true）已经
+        // 是为本面板调好的；handTransform 由 RotaryKnob.Awake() 自动找 DataGloveHandDriver；
+        // positionSource 由后续 Tools/Setup Knob Interaction 一并填好。
+        // 注意：每次重跑 Tools/Setup Control Panel 都会重新创建 Visual，
+        // 之前在 Inspector 上手动调过的 RotaryKnob 字段（如 sensitivity）会被还原成默认值。
+        knobVisual.AddComponent<RotaryKnob>();
 
         GameObject grab = CreatePrimitive(PrimitiveType.Sphere, "GrabZone", knob.transform,
             localPos: Vector3.zero,
-            localScale: new Vector3(0.1f, 0.1f, 0.1f),
+            localScale: new Vector3(0.13f, 0.13f, 0.13f),
             material: null);
 
         var rend = grab.GetComponent<MeshRenderer>();
@@ -173,7 +192,7 @@ public static class ControlPanelSetup
 
         GameObject bulb = CreatePrimitive(PrimitiveType.Sphere, "Bulb", lamp.transform,
             localPos: Vector3.zero,
-            localScale: new Vector3(0.08f, 0.08f, 0.08f),
+            localScale: new Vector3(0.10f, 0.10f, 0.10f),
             material: bulbMat);
 
         GameObject lightGo = new GameObject("PointLight");
@@ -182,7 +201,7 @@ public static class ControlPanelSetup
         Light light = lightGo.AddComponent<Light>();
         light.type      = LightType.Point;
         light.intensity = 0f;
-        light.range     = 0.6f;
+        light.range     = 0.85f;
         light.color     = new Color(1.0f, 0.9f, 0.7f);
 
         LampController ctrl = lamp.AddComponent<LampController>();

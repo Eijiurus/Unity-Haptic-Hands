@@ -6,6 +6,15 @@ using Assets.Device;
 /// 根据 GloveDataReceiver 提供的五指弯曲值旋转手指骨骼，
 /// 根据 WitMotion WT9011DCL-BT50 传感器提供的姿态数据旋转手腕。
 /// </summary>
+/// <remarks>
+/// 执行顺序：用 [DefaultExecutionOrder(-200)] 强制本驱动的 Update 在所有"普通"脚本之前跑。
+/// 这样有两层好处：
+///   1) RotaryKnob.Update 等下游脚本读取 RawWristTargetPosition 时，拿到的永远是当前帧最新值，
+///      不会有 1 帧 lag。
+///   2) lockWristPosition 写入 transform.localPosition 后，再没有任何 Update 可以晚于它跑去覆盖
+///      手腕位置——彻底排除"锁被另一脚本顶掉"的帧序竞争（这是 v7 抓取期间手腕抖动的最常见原因）。
+/// </remarks>
+[DefaultExecutionOrder(-200)]
 public class DataGloveHandDriver : MonoBehaviour
 {
     [SerializeField] private GloveDataReceiver gloveData;
@@ -24,6 +33,32 @@ public class DataGloveHandDriver : MonoBehaviour
     [Header("手指平滑")]
     [Tooltip("数值越大越平滑，但延迟也越大。设为 0 关闭平滑。")]
     [SerializeField, Range(0f, 30f)] private float smoothSpeed = 12f;
+
+    [Header("键盘握拳覆盖 (调试/演示)")]
+    [Tooltip("按下指定按键时，强制五指全部弯曲为握拳。")]
+    [SerializeField] private bool enableKeyboardFistOverride = true;
+
+    [Tooltip("触发握拳的按键。默认空格。")]
+    [SerializeField] private KeyCode fistOverrideKey = KeyCode.Space;
+
+    [Header("Wrist Rotation Lock")]
+    [Tooltip("When true, the wrist's rotation is not updated this frame. Used by interactive elements (e.g., RotaryKnob) that need to freeze the hand's wrist orientation while the user manipulates them.")]
+    public bool lockWristRotation = false;
+
+    [Header("Wrist Position Lock")]
+    [Tooltip("When true, the wrist's world position is hard-snapped to lockedWristPositionTarget every frame, ignoring the IMU/keyboard target. Used by GrabbableKnobAdapter to glue the virtual hand onto a knob during grab. The IMU pipeline keeps integrating internally, so RawWristTargetPosition still reflects real hand motion.")]
+    public bool lockWristPosition = false;
+
+    [Tooltip("World-space position the wrist snaps to while lockWristPosition is true (e.g. a knob's center).")]
+    public Vector3 lockedWristPositionTarget;
+
+    /// <summary>
+    /// World-space target position the IMU pipeline computed THIS frame, BEFORE smoothing and BEFORE any
+    /// lockWristPosition override. Read by RotaryKnob (and similar interactive elements) so they can detect
+    /// real hand displacement even while the visual wrist is snapped to a fixed object.
+    /// Updated once per frame inside ApplyFinalWristPosition.
+    /// </summary>
+    public Vector3 RawWristTargetPosition => _rawWristTargetWorld;
 
     [Header("手腕姿态 (WitMotion 传感器)")]
     [Tooltip("是否启用蓝牙传感器控制手腕旋转")]
@@ -147,6 +182,7 @@ public class DataGloveHandDriver : MonoBehaviour
     private Vector3 _initialWristPosition;
     private Vector3 _currentWristOffset;
     private Vector3 _wristVelocity;
+    private Vector3 _rawWristTargetWorld;
     private Vector3 _gravityEstimate;
     private bool _gravityEstimatePrimed;
     private Vector3 _filteredLinearAcceleration;
@@ -205,9 +241,10 @@ public class DataGloveHandDriver : MonoBehaviour
     {
         if (_bonesReady && gloveData != null)
         {
+            bool forceFist = enableKeyboardFistOverride && Input.GetKey(fistOverrideKey);
             for (int i = 0; i < 5; i++)
             {
-                float target = gloveData.FingerValues[i];
+                float target = forceFist ? 1f : gloveData.FingerValues[i];
                 _currentValues[i] = smoothSpeed > 0f
                     ? Mathf.Lerp(_currentValues[i], target, Time.deltaTime * smoothSpeed)
                     : target;
@@ -248,7 +285,10 @@ public class DataGloveHandDriver : MonoBehaviour
             _displayTargetWristRotation,
             Time.deltaTime * wristSmoothSpeed);
 
-        transform.localRotation = _initialWristRotation * _currentWristRotation;
+        if (!lockWristRotation)
+        {
+            transform.localRotation = _initialWristRotation * _currentWristRotation;
+        }
     }
 
     /// <summary>
@@ -593,9 +633,30 @@ public class DataGloveHandDriver : MonoBehaviour
     private void ApplyFinalWristPosition()
     {
         Vector3 combinedOffset = _currentWristOffset + _keyboardOffset;
-        Vector3 targetPos = _initialWristPosition + combinedOffset;
+        Vector3 targetLocal = _initialWristPosition + combinedOffset;
+
+        // Cache the unfiltered world-space IMU target every frame so RotaryKnob etc. can read
+        // the "raw" hand position even while lockWristPosition is forcing the visual wrist
+        // somewhere else. Using parent.TransformPoint keeps the value coherent regardless of
+        // whether this transform has a parent rig.
+        var parent = transform.parent;
+        _rawWristTargetWorld = parent != null ? parent.TransformPoint(targetLocal) : targetLocal;
+
+        if (lockWristPosition)
+        {
+            // Hard snap (no smoothing) — visual snap-to-grab is the intent here. The IMU pipeline
+            // (_currentWristOffset / _wristVelocity) keeps integrating in ApplyWristPosition,
+            // so on release the lerp below seamlessly resumes from the snapped pose toward the
+            // current IMU target without resetting state.
+            Vector3 lockedLocal = parent != null
+                ? parent.InverseTransformPoint(lockedWristPositionTarget)
+                : lockedWristPositionTarget;
+            transform.localPosition = lockedLocal;
+            return;
+        }
+
         float posSmooth = enableWristPosition ? wristPositionSmoothSpeed : 12f;
-        transform.localPosition = Vector3.Lerp(transform.localPosition, targetPos, Time.deltaTime * posSmooth);
+        transform.localPosition = Vector3.Lerp(transform.localPosition, targetLocal, Time.deltaTime * posSmooth);
     }
 
     public void ResetWristPositionOffset()
@@ -608,6 +669,29 @@ public class DataGloveHandDriver : MonoBehaviour
         _wristStillTimer = 0f;
         _positionFreezeTimer = 0f;
         transform.localPosition = _initialWristPosition;
+    }
+
+    /// <summary>
+    /// 把 IMU 位置积分器的"中性原点"重新锚定到手腕当前所在的位置，并清空积分状态。
+    /// 用法：在 lockWristPosition 即将变为 false 之前调用——这样解锁后，
+    /// IMU 弹簧会把手拉回到"当前位置"（旋钮）而不是场景启动时的初始位置，
+    /// 用户体验上就是"松开旋钮，手停在原地不会传送回去"。
+    /// 调用时已经把 transform.localPosition 设为期望的新原点（例如锁定状态下就是 lockedWristPositionTarget），
+    /// 本函数读取它并把它当作新的 _initialWristPosition。
+    /// 同时清空 _currentWristOffset / _wristVelocity / _keyboardOffset / 加速度滤波器，
+    /// 让接下来的 IMU 积分从全零状态、围绕新原点重新开始。
+    /// 不影响旋转锁、不影响骨骼。
+    /// </summary>
+    public void RebaseWristAnchorToCurrent()
+    {
+        _initialWristPosition = transform.localPosition;
+        _currentWristOffset = Vector3.zero;
+        _wristVelocity = Vector3.zero;
+        _keyboardOffset = Vector3.zero;
+        _filteredLinearAcceleration = Vector3.zero;
+        _linearAccelerationFilterPrimed = false;
+        _wristStillTimer = 0f;
+        _positionFreezeTimer = 0f;
     }
 
 #if UNITY_EDITOR

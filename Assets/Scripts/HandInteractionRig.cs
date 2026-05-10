@@ -49,8 +49,20 @@ public class HandInteractionRig : MonoBehaviour
     [Tooltip("无手套数据时，按住此键也可捏取（便于测试）")]
     [SerializeField] KeyCode pinchKey = KeyCode.G;
 
-    [Tooltip("宽松抓握阈值（0~1）：任意手指弯曲超过该值即视为可抓握状态")]
+    [Tooltip("宽松抓握阈值（0~1）：任意手指弯曲超过该值即视为可抓握状态。\n" +
+             "仅在 enableAnySingleFingerBentGrab=true 时生效。")]
     [SerializeField, Range(0.05f, 0.9f)] float bentGrabThreshold = 0.25f;
+
+    [Tooltip("【宽松判定 1】启用『任一手指弯曲超过 bentGrabThreshold 即抓取』。\n" +
+             "默认关闭——这种判定过于宽松，手指无意识轻微卷曲就会触发抓取。\n" +
+             "仅在确认拇指+食指捏合 / 握拳判定都不可用、需要兜底时打开。")]
+    [SerializeField] bool enableAnySingleFingerBentGrab = false;
+
+    [Tooltip("【宽松判定 2】启用『任一手指弯曲值低于 bentGrabLowThreshold 即抓取』。\n" +
+             "用于某些手套『弯曲=数值接近 0』的反向映射兜底。\n" +
+             "默认关闭——正常映射下手张开时五指弯曲值都接近 0，开启会导致『手伸开 = 一直在抓』，\n" +
+             "你触碰旋钮的瞬间立即吸附。仅在你确认手套是反向映射时打开。")]
+    [SerializeField] bool enableInverseBentGrab = false;
 
     [Tooltip("抓取后挂载到手掌根节点（更稳，不容易被推开）")]
     [SerializeField] bool attachToPalm = true;
@@ -58,7 +70,8 @@ public class HandInteractionRig : MonoBehaviour
     [Header("调试日志")]
     [SerializeField] bool showGrabDebugLog = true;
 
-    [Tooltip("低值弯曲阈值（用于有些手套“弯曲=接近0”的映射）")]
+    [Tooltip("低值弯曲阈值（用于有些手套“弯曲=接近0”的映射）。\n" +
+             "仅在 enableInverseBentGrab=true 时生效。")]
     [SerializeField, Range(0f, 0.4f)] float bentGrabLowThreshold = 0.12f;
 
     static readonly string[] s_distalBones =
@@ -199,8 +212,10 @@ public class HandInteractionRig : MonoBehaviour
             {
                 float v = gloveData.FingerValues[i];
                 sum += v;
-                if (v >= bentGrabThreshold) pinchByAnyBent = true;
-                if (v <= bentGrabLowThreshold) pinchByAnyBentLow = true;
+                // 这两个宽松兜底判定默认关闭——用户报告的『手张开/触碰即被吸到旋钮』
+                // 就是 enableInverseBentGrab 默认 ON 时，五指都接近 0 → 被识别成抓取造成的。
+                if (enableAnySingleFingerBentGrab && v >= bentGrabThreshold) pinchByAnyBent = true;
+                if (enableInverseBentGrab && v <= bentGrabLowThreshold) pinchByAnyBentLow = true;
             }
             float avg = count > 0 ? sum / count : 0f;
             pinchByFist = avg >= fistGripThreshold;
