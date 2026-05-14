@@ -17,7 +17,7 @@
 | 控制台物理 UI | `ControlPanelSetup` 生成 **ControlPanel**（桌、双按钮、`PressableButton` / `ButtonTriggerZone`、`LampController`、旋钮）；指尖 **`FingerTip`** + 触发体即可按压，**无需**在按钮上挂 `GloveDataReceiver` |
 | 旋钮交互 | **速率累加 + snap-to-grab** 旋钮（v12）：`GrabbableKnobAdapter` 拦截 `TouchableObject` 抓取，把旋钮钉在面板上、把虚拟手"焊"到当前位置（`lockWristPosition` + 重锚），抓取期间冻结手腕方向（`lockWristRotation`）、对底层 pinch 抖动做去抖；`RotaryKnob` 读 `DataGloveHandDriver.RawWristTargetPosition`，按"每帧位移 → 速度阈值过滤 → 累加器 → degreesPerMeter"映射为角度（**速率累加** 而非绝对位移，专治 IMU 弹簧回中导致的"灯亮一下又暗回去"）；`MasterBrightnessController` 把 0–1 输出同步分发给一组 `LampController`，并保留键盘 0–9 / `=` 旁路用于诊断 |
 | 触觉反馈输出 | **Unity → UDP → `HapticBridge.py` → HID → DRV2605 双路 LRA**（与 SensorBridge.py 完全对偶）。`HapticOutput` 把按钮咔嗒、旋钮步进、抓握等事件转成 `EFFECT,L,R` 文本指令发到 `127.0.0.1:5006`；菜单 **Tools → Setup Haptics** 一键把场景里所有 `PressableButton.onPressed` / `RotaryKnob.onStepClicked` 接上；不需要 Unity 直接持有 HID 库 |
-| 无手套调试 | `DataGloveHandDriver` 的 **Space 键全握拳**（`enableKeyboardFistOverride`）+ `GloveDataReceiver` 的键盘模拟（1–5 单指）；`SceneViewHandKeyboardBridge` 在 Scene 视图用 WASD 等微调手部位移（运行中）；`GrabbableKnobAdapter` 可启用 **`useDirectFingerBendGrab`** 直接根据手指弯曲度抓取旋钮，绕过触发器与 pinch 检测 |
+| 无手套调试 | `DataGloveHandDriver` 的 **Space 键全握拳**（`enableKeyboardFistOverride`）+ `GloveDataReceiver` 的键盘模拟（1–5 单指）；`DataGloveHandDriver` 的 **WASD / QE / R** 等键盘位姿控制（Game 视图聚焦时，详见 `UpdateKeyboardPositionOffset`）；`GrabbableKnobAdapter` 可启用 **`useDirectFingerBendGrab`** 直接根据手指弯曲度抓取旋钮，绕过触发器与 pinch 检测 |
 
 本项目 **未** 在 `Packages/manifest.json` 中引入 **XR Interaction Toolkit**；交互基于自定义 Trigger / 捏合阈值与物理刚体。
 
@@ -35,7 +35,6 @@ flowchart LR
   subgraph PC[PC / Python]
     Bridge[SensorBridge.py\n串口 → UDP 5005]
     HBridge[HapticBridge.py\nUDP 5006 → HID]
-    HID[test_hid / test_vibrate.py\n离线冒烟测试]
   end
   subgraph Unity[Unity 2022.3 LTS]
     Recv[GloveDataReceiver]
@@ -60,9 +59,8 @@ flowchart LR
 **四条主通道简述：**
 
 1. **手套（输入，串口→UDP）**：蓝牙虚拟串口（上位机或系统枚举为 COMx）→ `SensorBridge.py` 用 `read_until(b';')` 读到分号包尾、去分号 → UDP `127.0.0.1:5005`（默认）→ `GloveDataReceiver` 解析 11 个逗号分隔数值中的前 5 个为弯曲（0–1800 对应 0°–180°），归一化后交给 `DataGloveHandDriver`。运行前请关闭占用串口的 **OneCOM** 等上位机，否则会与 Python 抢端口。`SERIAL_PORT` / `BAUD_RATE` / `VERBOSE_PRINT` 都可用环境变量覆盖（见 §3.2）。
-2. **姿态传感器（输入，BLE→Unity）**：`WitMotionConnector` 使用 `Assets/Scripts/Bluetooth/BleApi`（WinRT 原生 `BleWinrtDll.dll`）持续轮询扫描，匹配名称含 **WT** 的设备并连接；数据经 `DeviceModel` 线程解析，供 `DataGloveHandDriver` 做手腕旋转与受限相对位移估计。当前位移链路**不以远距离连续平移为目标**，而是服务**近场交互**：在 **慢速低通估计重力 + 启动静止标定 + 转动冻结窗口 + 弹簧回中** 的基础上，可通过 **`usePlanarPositionOnly`** 自动压掉 `positionAxisWeight` 中最不稳定的一轴（仅两轴参与位移），并用 **`positionRecenteringSpeed`** 在非静止状态下极慢地将偏移拉回零，减轻长期累计漂移。项目中另有 `BlueScanner` / `BlueConnector` 通用扫描连接栈，当前 WT 流程以 `WitMotionConnector` 为主（避免短轮询漏设备）。
+2. **姿态传感器（输入，BLE→Unity）**：`WitMotionConnector` 使用 `Assets/Scripts/Bluetooth/BleApi`（WinRT 原生 `BleWinrtDll.dll`）持续轮询扫描，匹配名称含 **WT** 的设备并连接；数据经 `DeviceModel`（依赖 `BlueConnector` 完成 GATT 连接与收包线程）解析，供 `DataGloveHandDriver` 做手腕旋转与受限相对位移估计。当前位移链路**不以远距离连续平移为目标**，而是服务**近场交互**：在 **慢速低通估计重力 + 启动静止标定 + 转动冻结窗口 + 弹簧回中** 的基础上，可通过 **`usePlanarPositionOnly`** 自动压掉 `positionAxisWeight` 中最不稳定的一轴（仅两轴参与位移），并用 **`positionRecenteringSpeed`** 在非静止状态下极慢地将偏移拉回零，减轻长期累计漂移。
 3. **触觉（输出，UDP→HID，与手套通道完全反向）**：场景里挂 **`HapticOutput`** 单例，按钮 `onPressed` / 旋钮 `onStepClicked` 等事件触发 `PlayButtonClick()` / `PlayKnobStep()`，组件以 UTF-8 文本 `EFFECT,L,R` 通过 UDP `127.0.0.1:5006`（默认）发送给 **`HapticBridge.py`**；Python 端打开 **VID `0x674E` / PID `0x000A`** 的 HID 板，按 *『手机多马达振动驱动板』第 5.2 节* 拼装 65 字节 0xBB 报文（左路写 byte[2]、右路写 byte[10]），调用 DRV2605 库振动 ID（0–123）。所有 HID 依赖只在 Python 端，Unity 端零原生依赖。也可发 `STOP`（两路停振）/ `PING`（bridge 回 `PONG`）。`HapticOutput.minIntervalMillis` 做 35 ms 的发送节流，避免旋钮快速旋转时把 LRA 糊成一团。
-4. **离线 HID 冒烟测试**：根目录 `test_hid.py`（0xAA 命令）/ `test_vibrate.py`（遍历 0xBB 库振动）不依赖 Unity，可用于在没启动游戏前先确认马达板/驱动可用。
 
 ---
 
@@ -80,7 +78,7 @@ flowchart LR
 - **Unity**：`2022.3.62f3` LTS（见 `ProjectSettings/ProjectVersion.txt`）
 - **Python 3.x**：
   - `pyserial` —— `SensorBridge.py`（手套串口→UDP）。可用环境变量 `SERIAL_PORT` / `BAUD_RATE` / `VERBOSE_PRINT` 覆盖默认值；脚本内默认 `SERIAL_PORT=COM4`、`BAUD_RATE=115200`、`UDP_PORT=5005`，并使用 `read_until(b';')` + `set_low_latency_mode(True)` 降低端到端延迟。
-  - `hid`（[`hidapi`](https://pypi.org/project/hidapi/)） —— `HapticBridge.py`（Unity UDP→HID）与根目录的 `test_hid.py` / `test_vibrate.py`。`HapticBridge.py` 同样支持环境变量覆盖：`HAPTIC_UDP_PORT`（默认 5006）、`HAPTIC_HID_VID`（默认 `0x674e`）、`HAPTIC_HID_PID`（默认 `0x000a`）、`HAPTIC_VERBOSE`（`"1"` 打开每帧日志）。
+  - `hid`（[`hidapi`](https://pypi.org/project/hidapi/)） —— `HapticBridge.py`（Unity UDP→HID）。同样支持环境变量覆盖：`HAPTIC_UDP_PORT`（默认 5006）、`HAPTIC_HID_VID`（默认 `0x674e`）、`HAPTIC_HID_PID`（默认 `0x000a`）、`HAPTIC_VERBOSE`（`"1"` 打开每帧日志）。
 - **Arduino IDE**（若使用 Arduino 触觉方案；当前主路径直接走 HID 板，Arduino 仅作为可选替代）
 
 ### 3.3 Unity 包说明
@@ -94,15 +92,12 @@ flowchart LR
 ```
 My project/
 ├── README.md
-├── test_hid.py              # HID 单发振动测试（命令 0xAA）
-├── test_vibrate.py          # 遍历 DRV2605 效果 ID（命令 0xBB）
 ├── Assets/
 │   ├── Editor/
 │   │   ├── RiggedHandPrefabSetup.cs   # 菜单 Tools → Setup Rigged Hand Prefab
 │   │   ├── ControlPanelSetup.cs       # 菜单 Tools → Setup Control Panel（控制台层级与按钮→灯绑定）
 │   │   ├── KnobInteractionSetup.cs    # 菜单 Tools → Setup Knob Interaction（一键把 GrabZone 抓取链路、RotaryKnob 字段、MasterController 与持久 onValueChanged 配齐）
-│   │   ├── HapticSetup.cs             # 菜单 Tools → Setup Haptics（创建 HapticController、把所有按钮/旋钮事件持久绑定到 HapticOutput）
-│   │   └── SceneViewHandKeyboardBridge.cs  # 运行时在 Scene 视图用键盘微调手部位置
+│   │   └── HapticSetup.cs             # 菜单 Tools → Setup Haptics（创建 HapticController、把所有按钮/旋钮事件持久绑定到 HapticOutput）
 │   ├── Materials/
 │   │   ├── HandSkin.mat
 │   │   └── ControlPanel/              # 控制台灰/红/蓝/灯泡材质（由 Setup 生成或使用）
@@ -131,7 +126,6 @@ My project/
 │       ├── HandSceneSetup.cs      # 主摄像机对准手部
 │       ├── Bluetooth/
 │       │   ├── BlueConnector.cs   # GATT 连接与收包线程
-│       │   ├── BlueScanner.cs     # 通用 BLE 扫描（可与 WitMotionConnector 并存注意资源）
 │       │   └── BleApi/
 │       │       ├── BleApi.cs      # WinRT BLE 封装
 │       │       └── BleWinrtDll.dll
@@ -165,7 +159,6 @@ My project/
 | `HandSceneSetup.cs` | 挂主摄像机，`LateUpdate` 对准 `LeftHand` 渲染包围盒 |
 | `RiggedHandPrefabSetup.cs` | 编辑器一键生成左手 Prefab、布置场景、默认键盘手套模式 |
 | `HapticSetup.cs` | 编辑器菜单 **Tools → Setup Haptics**：场景里找/建 `HapticController` 并挂 `HapticOutput`；把所有 `PressableButton.onPressed` 持久绑定到 `HapticOutput.PlayButtonClick`、所有 `RotaryKnob.onStepClicked` 持久绑定到 `HapticOutput.PlayKnobStep`。重复执行只清自己加的 listener，不会吃掉用户手工添加的其他事件。整次配置走 `Undo` 系统 |
-| `SceneViewHandKeyboardBridge.cs` | 编辑模式下 Scene 视图焦点时 WASD/QE 等控制位移（配合 `DataGloveHandDriver` 键盘位姿开关） |
 
 **手套数据格式**（`GloveDataReceiver` 注释）：一行如 `1504,900,100,0,0,0,0,0,0,0,0` — 前 5 个数为 CH1–CH5 弯曲（小指→拇指），脚本可反转为拇指在前再驱动骨骼。
 
@@ -185,7 +178,7 @@ My project/
 2. Play：
    - **1–5** 控制五指弯曲，**Space** 握拳（`GloveDataReceiver.useKeyboardSimulation` 内置）。
    - 即使没勾键盘模拟，**`DataGloveHandDriver.enableKeyboardFistOverride`**（默认开启）也会让你按住 **Space** 把所有手指弯曲值强制为 1——这是给 `GrabbableKnobAdapter.useDirectFingerBendGrab` 与 `HandInteractionRig` 的 fist 抓取留的"键盘旁路"，演示中按 Space 即可一键握拳触发抓取。
-   - **Scene** 视图聚焦时可用 **WASD / QE / PageUp-Down** 等微调位置（`SceneViewHandKeyboardBridge`）。
+   - **Game** 视图聚焦时可用 **WASD / QE / PageUp-Down** 等微调位置，按 **R / P / Keypad0** 一键重置（见 `DataGloveHandDriver.UpdateKeyboardPositionOffset`）。
 3. `DataGloveHandDriver` 中可单独开关手腕旋转/位置与键盘位置调试选项。
 
 ### 6.3 连接真实手套
@@ -277,22 +270,7 @@ ControlPanel
 
 ---
 
-## 7. 根目录 Python：HID 触觉离线测试
-
-`HapticBridge.py` 之外，根目录还有两个**完全不依赖 Unity 与 UDP** 的脚本，可在没启动游戏前先确认马达板/驱动可用：
-
-需要先安装：`pip install hid`（Windows 上通常还需可用的 USB/HID 驱动，必要时管理员权限运行）。
-
-| 脚本 | 作用 |
-|------|------|
-| `test_hid.py` | 打开 VID/PID，发送 **0xAA** 命令触发左右路"射击"类振动，可选读 64 字节回包 |
-| `test_vibrate.py` | 循环发送 **0xBB** 命令，对左右路写入 DRV2605 波形编号（脚本内 `effects_to_test` 列表），每条约 2 秒 |
-
-若 VID/PID 或报文格式与你的硬件不一致，请按实际固件修改脚本常量。注意：游戏运行时 `HapticBridge.py` 已经独占了 HID 设备，再跑这两个脚本会失败，需先停掉 bridge。
-
----
-
-## 8. 常见问题（排障）
+## 7. 常见问题（排障）
 
 - **手套无数据**：检查 COM 号、是否被 OneCOM 等占用、波特率 115200、`SensorBridge.py` 与 Unity 端口一致、防火墙是否拦截本机 UDP。
 - **BLE 搜不到 WT**：确认设备名广播含 WT、蓝牙已开、`scanTimeout` 足够；Windows 对 `connectable=False` 时可勾选 `WitMotionConnector` 的 **connectEvenIfNotConnectable**。
@@ -305,14 +283,14 @@ ControlPanel
 - **松手瞬间手"传送回胸前"**：`GrabbableKnobAdapter.rebaseHandAnchorOnRelease` 没勾选。开启后释放时会先把 IMU 积分器重锚到旋钮位置，然后才解锁。
 - **抓/放快速抖跳（手腕在旋钮和 IMU 位置之间反复跳）**：底层 pinch 检测在阈值附近抖动。把 `GrabbableKnobAdapter.minLockHoldDuration` 调到 0.20–0.30 即可吃掉抖动；松手感觉延迟时再调小。
 - **旋钮转动后灯亮一下又自己暗下去**：v12 之前的"绝对位移→角度"模式会被 `DataGloveHandDriver` 的弹簧回中拉回。当前 `RotaryKnob` 已经是 v12 速率累加 + 速度阈值过滤；如果还看到衰减，把 **`driftVelocityThreshold` 提高到 0.10–0.12**（更激进地丢掉慢速漂移），或确认 `useRawWristPosition` 是开的（关掉就会读到 lock 之后已被冻结的 visual handTransform，根本没有有效位移）。
-- **HapticBridge 报 `HID 打开失败`**：板子没插好 / 被独占 / 未装驱动。先停掉游戏和 bridge → 单独跑根目录的 `python test_hid.py` 验证设备能不能开；驱动正常时 bridge 会自动按 `RECONNECT_INTERVAL`（1.5 s）重试，不需要手动重启。
+- **HapticBridge 报 `HID 打开失败`**：板子没插好 / 被独占 / 未装驱动。先停掉游戏和 bridge，确认 VID `0x674E` / PID `0x000A` 的设备在系统中可见后再起 bridge；驱动正常时 bridge 会自动按 `RECONNECT_INTERVAL`（1.5 s）重试，不需要手动重启。
 - **按按钮没振动**：(1) `HapticBridge.py` 没在跑——Unity Console 里 `HapticOutput` 不报错（UDP 发送本身从不失败，因为是 fire-and-forget）；先在终端里看 bridge 是否在打 5s 间隔的统计日志；(2) `Tools → Setup Haptics` 没跑过——按钮 `onPressed` 上没有 `HapticOutput.PlayButtonClick` 这条 listener；(3) 节流窗口太大——把 `HapticOutput.minIntervalMillis` 调到 0 试试；(4) 选错效果 ID（`buttonClickEffect=0` 等于不振）。最快诊断：勾上 `HapticOutput.logSends`，每次按下会打一条 `sent 'EFFECT,1,1' → 127.0.0.1:5006`，没打就是 Unity 端没触发，打了但没振就是 bridge / 板子端的问题。
 - **旋钮快转时振动糊成一片或消失**：旋钮 onStepClicked 触发频率 > LRA 物理响应。调大 `HapticOutput.minIntervalMillis`（到 50–80 ms）或增大 `RotaryKnob.angleStep`（默认 15°，调到 20–25° 可拉开间隔）。
 
 ---
 
-## 9. 维护建议
+## 8. 维护建议
 
-- 修改串口协议、UDP 格式（包括手套侧 5005 与触觉侧 5006）、BLE UUID、WT 位置估计参数策略、抓取逻辑、旋钮速率累加/速度阈值映射、`DataGloveHandDriver` 的 lock/rebase 接口或 snap-to-grab 流程、`HapticOutput` ↔ `HapticBridge.py` 的文本协议（`EFFECT,L,R` / `STOP` / `PING`）或 0xBB HID 报文布局时，请同步更新 **第 1、2、3、5、6、8 节** 与相关脚本顶部注释。
+- 修改串口协议、UDP 格式（包括手套侧 5005 与触觉侧 5006）、BLE UUID、WT 位置估计参数策略、抓取逻辑、旋钮速率累加/速度阈值映射、`DataGloveHandDriver` 的 lock/rebase 接口或 snap-to-grab 流程、`HapticOutput` ↔ `HapticBridge.py` 的文本协议（`EFFECT,L,R` / `STOP` / `PING`）或 0xBB HID 报文布局时，请同步更新 **第 1、2、3、5、6、7 节** 与相关脚本顶部注释。
 - 新增场景、Prefab 或第三方插件时，在本 README 增加一行说明其角色，避免后续读者只在工程里"猜"。
 - 新加触觉效果 ID 或扩展协议（例如 RTP 模式 0xCC）时：先在 `HapticBridge.py` 加报文构造函数 → 在 `HapticOutput.cs` 加对应的 `Play*` 包装 → 在本 README §3.3 / §6.6 同步说明 → 在 `HapticSetup.cs` 决定是否要默认接线。

@@ -72,7 +72,7 @@ namespace Assets.Device
         /// <summary>
         /// 获取设备 Get device
         /// </summary>
-        public DeviceModel GetDevice(string key) {
+        public DeviceModel GetDevice(string key) { 
             if (devicesDict.ContainsKey(key))
             {
                 return devicesDict[key];

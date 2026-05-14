@@ -6,9 +6,9 @@ using Assets.Device;
 /// <summary>
 /// 管理 WitMotion WT9011DCL-BT50 蓝牙传感器的扫描和连接。
 /// 
-/// 绕过 SDK 的 BlueScanner（其轮询窗口太短容易漏掉设备），
 /// 直接调用 BleApi 底层函数，在 Update 中持续轮询扫描结果，
-/// 确保不会错过任何 BLE 广播。
+/// 确保不会错过任何 BLE 广播——一次性的扫描函数轮询窗口偏短容易漏掉设备，
+/// 改成在 MonoBehaviour.Update 内不断 Poll。
 /// </summary>
 public class WitMotionConnector : MonoBehaviour
 {

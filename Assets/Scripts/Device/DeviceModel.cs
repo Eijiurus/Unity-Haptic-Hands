@@ -325,29 +325,29 @@ namespace Assets.Device
         /// <summary> 
         /// 获取传感器演示数据 Obtain sensor demonstration data
         /// </summary>
-        public string GetDataDisplay()
+        public string GetDataDisplay() // GetDataDisplay是获取传感器演示数据
         {
-            string Acc = $"AccX:{GetDeviceData("AccX")}g\t\tAccY:{GetDeviceData("AccY")}g\t\tAccZ:{GetDeviceData("AccZ")}g\r\n";
-            string As = $"AsX:{GetDeviceData("AsX")}°/s\t\tAsY:{GetDeviceData("AsY")}°/s\t\tAsZ:{GetDeviceData("AsZ")}°/s\r\n";
-            string Angle = $"AngleX:{GetDeviceData("AngX")} °\t\tAngleY: {GetDeviceData("AngY")} °\t\tAngleZ: {GetDeviceData("AngZ")}°\r\n";
-            string Mag = $"HX:{GetDeviceData("HX")}ut\t\tHY:{GetDeviceData("HY")}ut\t\tHZ:{GetDeviceData("HZ")}ut\r\n";
-            string Electricity = $"Electricity:{GetDeviceData("Battery")}%";
-            string data = Acc + As + Angle + Mag + Electricity;
-            return data;
+            string Acc = $"AccX:{GetDeviceData("AccX")}g\t\tAccY:{GetDeviceData("AccY")}g\t\tAccZ:{GetDeviceData("AccZ")}g\r\n"; // Acc是加速度
+            string As = $"AsX:{GetDeviceData("AsX")}°/s\t\tAsY:{GetDeviceData("AsY")}°/s\t\tAsZ:{GetDeviceData("AsZ")}°/s\r\n"; // As是角速度
+            string Angle = $"AngleX:{GetDeviceData("AngX")} °\t\tAngleY: {GetDeviceData("AngY")} °\t\tAngleZ: {GetDeviceData("AngZ")}°\r\n"; // Angle是角度
+            string Mag = $"HX:{GetDeviceData("HX")}ut\t\tHY:{GetDeviceData("HY")}ut\t\tHZ:{GetDeviceData("HZ")}ut\r\n"; // Mag是磁场
+            string Electricity = $"Electricity:{GetDeviceData("Battery")}%"; // Electricity是电量
+            string data = Acc + As + Angle + Mag + Electricity; // data是数据
+            return data; // 返回数据
         }
 
         /// <summary>
         /// 发送数据 Send data
         /// </summary>
-        public void SendData(byte[] cmd) {
-            BleApi.BLEData data = new BleApi.BLEData();
-            data.buf = cmd;
-            data.size = (short)data.buf.Length;
-            data.deviceId = this.deviceId;
-            data.serviceUuid = BlueConnector.UUID_SERVICE;
-            data.characteristicUuid = BlueConnector.UUID_WRITE;
+        public void SendData(byte[] cmd) { // SendData是发送数据
+            BleApi.BLEData data = new BleApi.BLEData(); // 创建BLE数据
+            data.buf = cmd; // 设置数据
+            data.size = (short)data.buf.Length; // 设置大小
+            data.deviceId = this.deviceId; // 设置设备ID
+            data.serviceUuid = BlueConnector.UUID_SERVICE; // 设置服务UUID
+            data.characteristicUuid = BlueConnector.UUID_WRITE; // 设置特征UUID
             // 入队
-            cmdQueue.Enqueue(data); 
+            cmdQueue.Enqueue(data); // 入队
         }
     }
 }

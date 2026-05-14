@@ -28,79 +28,79 @@ namespace Assets.Bluetooth
         public bool isConnect = false;
 
         // 收到数据事件 Received data event
-        public delegate void ReceiveEventHandler(string deviceId, byte[] data);
-        public event ReceiveEventHandler OnReceive;
+        public delegate void ReceiveEventHandler(string deviceId, byte[] data); // ReceiveEventHandler是收到数据事件
+        public event ReceiveEventHandler OnReceive; // OnReceive是收到数据事件
 
-        private BlueConnector() { }
+        private BlueConnector() { } // BlueConnector是蓝牙连接器
 
-        public static BlueConnector Instance
+        public static BlueConnector Instance // Instance是实例
         {
             get
             {
-                if (_instance == null)
+                if (_instance == null) // 如果实例为空，则创建实例
                 {
                     _instance = new BlueConnector();
                 }
-                return _instance;
+                return _instance; // 返回实例
             }
         }
 
         /// <summary>
         /// 开始连接 Start connecting
         /// </summary>
-        public void Connect(string deviceId)
+        public void Connect(string deviceId) // Connect是连接
         {
-            try
+            try // 尝试连接
             {
-                BleApi.SubscribeCharacteristic(deviceId, UUID_SERVICE, UUID_READ, false);
+                BleApi.SubscribeCharacteristic(deviceId, UUID_SERVICE, UUID_READ, false); // 订阅特征
                 Debug.Log("连接设备成功");
-                if (isConnect) {
+                if (isConnect) { // 如果已连接，则返回
                     return;
                 }
-                isConnect = true;
-                receiveTh = new Thread(ReceiveData);
-                receiveTh.IsBackground = true;
-                receiveTh.Start();
+                isConnect = true; // 设置为已连接   
+                receiveTh = new Thread(ReceiveData); // 创建接收数据线程
+                receiveTh.IsBackground = true; // 设置为后台线程
+                receiveTh.Start(); // 启动接收数据线程
             }
-            catch (Exception ex)
+            catch (Exception ex) // 捕捉异常
             {
-                Debug.LogError(ex.Message);
+                Debug.LogError(ex.Message); // 打印错误信息
                 Debug.Log("连接设备失败");
-            }
+            } // 捕捉异常
         }
 
         /// <summary>
         /// 接收数据线程 Receive data thread
         /// </summary>
-        private void ReceiveData() {
-            BleApi.BLEData res = new BleApi.BLEData();
+        private void ReceiveData() { // ReceiveData是接收数据
+            BleApi.BLEData res = new BleApi.BLEData(); // 创建BLE数据
             while (true) {
-                while (isConnect && BleApi.PollData(out res, false))
+                while (isConnect && BleApi.PollData(out res, false)) // 如果已连接，则轮询数据
                 {
-                    OnReceive?.Invoke(res.deviceId, res.buf);
+                    OnReceive?.Invoke(res.deviceId, res.buf); // 调用收到数据事件
                 }
-                Thread.Sleep(1);
+                Thread.Sleep(1); // 睡眠1毫秒
             }
         }
 
         /// <summary>
         /// 关闭连接 Close Connection
         /// </summary>
-        public void Disconnect() {
-            if (DevicesManager.Instance.isHaveOpenDevice()) {
+        public void Disconnect() { // Disconnect是关闭连接
+            if (DevicesManager.Instance.isHaveOpenDevice()) { // 如果存在连接中的设备，则返回
                 return;
             }
-            try
+            try // 尝试关闭连接
             {
-                isConnect = false;
-                Thread.Sleep(200);
-                receiveTh.Abort();
-                receiveTh = null;
+                isConnect = false; // 设置为未连接
+                Thread.Sleep(200); // 睡眠200毫秒
+                receiveTh.Abort(); // 终止接收数据线程
+                receiveTh = null; // 设置为null
             }
-            catch (Exception)
+            catch (Exception) // 捕捉异常
             {
-                // 捕捉异常但不处理
+                // 捕捉异常但不处理 捕捉异常但不处理
             }
-        }    
-    }
+        }    // 捕捉异常但不处理
+    } // 关闭连接
 }
